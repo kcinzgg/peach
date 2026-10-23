@@ -32,7 +32,7 @@ from starlette.staticfiles import StaticFiles
 from . import (
     avatar_face, avatar_online, avatar_picker, avatar_provider, follow_assets, follow_providers, images,
     jav_poster_crop, link_marks, link_status, scraping_access, site_icons, social_links, subtitles,
-    taste_history, timeline_sheets, web_follow,
+    taste_history, timeline_sheets, web_follow, public_http,
 )
 from .config import GENERATED_DIR, PROJECT_ROOT
 from .entities import resolve_entity_id
@@ -48,7 +48,7 @@ from .follow_stream import (
 from .media import MediaUnavailable, normalized_path
 from .platform import within_root
 from .previews import ENTITY_THUMB_TYPE, PreviewUnavailable, entity_image_key
-from .remote_media_cache import AVATAR_REFRESH_SECONDS, FAVICON_REFRESH_SECONDS, cache_for
+from .remote_media_cache import AVATAR_REFRESH_SECONDS, FAVICON_REFRESH_SECONDS, MEDIA_SECURITY_HEADERS, cache_for
 from .preview_cache import PreviewCache
 from .routes_auth import require_auth
 from .segments import SegmentCancelled, SegmentUnavailable, build_hls_playlist
@@ -82,10 +82,6 @@ def _asset_response(request: Request, path: Path | None):
                         headers={"cache-control": "no-store"})
     return _image_response(request, path, media_type=follow_assets.content_type(path))
 
-#: 取图标时报浏览器 UA。CDN 上的图标资产（p-smith、static.cdninstagram）对
-#: 机器人 UA 会直接 403，而这只是一次公开静态文件请求，没有伪装成用户的意思。
-from .user_agent import USER_AGENT
-
 #: 文件名里不能出现的字符，按 Windows 的最严口径取——落盘的那台多半是它。
 _UNSAFE_FILENAME = re.compile('[\\/:*?"<>|]+|[\x00-\x1f]+')
 
@@ -99,10 +95,12 @@ def _image_response(request: Request, path: Path, media_type: str | None = None)
     """固定图片 URL 使用私有缓存，并按文件 ETag 复验。"""
     response = FileResponse(path, media_type=media_type, stat_result=path.stat())
     response.headers["Cache-Control"] = "private, no-cache"
+    response.headers.update(MEDIA_SECURITY_HEADERS)
     if StaticFiles().is_not_modified(response.headers, request.headers):
         return Response(status_code=304, headers={
             "ETag": response.headers["etag"],
             "Cache-Control": response.headers["cache-control"],
+            **MEDIA_SECURITY_HEADERS,
         })
     return response
 
@@ -1142,14 +1140,12 @@ def _site_mark_response(state, url: str, root: Path):
     if not link_marks.is_fresh(cached, ttl=FAVICON_REFRESH_SECONDS):
         def fetch(target: str):
             try:
-                upstream = state.http_transport.client.get(
-                    locate(target), headers={"User-Agent": USER_AGENT},
-                    timeout=8, follow_redirects=True)
-            except (OSError, httpx.HTTPError):
+                upstream = public_http.get(locate(target), client_options={'trust_env': True})
+            except (OSError, ValueError, public_http.requests.exceptions.RequestException):
                 return None
-            if upstream.status_code != 200 or not upstream.content:
+            if upstream.status != 200 or not upstream.body:
                 return None
-            return upstream.content, upstream.headers.get("content-type", "")
+            return upstream.body, upstream.headers.get("content-type", "")
 
         # 两条通道都不适用时退回原样缩图：糊一点也好过露出地球图标。存档链接例外：原站
         # 给不出合格的圆标就用存档站自己的图标，点过去本来就是存档。原站那张不合格的图

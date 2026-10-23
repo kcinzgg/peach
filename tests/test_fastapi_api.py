@@ -943,7 +943,7 @@ class FastApiContractTests(unittest.IsolatedAsyncioTestCase):
             hosts.append(request.url.host)
             return httpx.Response(200, content=png, request=request,
                                   headers={"content-type": "image/png"})
-        self._swap_http_client(upstream)
+        self._mock_public_resources(upstream)
 
         denied = await self.client.get("/site-mark?source=airav")
         self.assertEqual(denied.status_code, 401)
@@ -1022,7 +1022,7 @@ class FastApiContractTests(unittest.IsolatedAsyncioTestCase):
             image.save(buffer, format="PNG")
             return httpx.Response(200, content=buffer.getvalue(), request=request,
                                   headers={"content-type": "image/png"})
-        self._swap_http_client(upstream)
+        self._mock_public_resources(upstream)
         with closing(sqlite3.connect(self.db)) as connection, connection:
             connection.executemany(
                 "INSERT INTO entity_link(id,entity_id,link_kind,label,url,hostname)"
@@ -1030,6 +1030,17 @@ class FastApiContractTests(unittest.IsolatedAsyncioTestCase):
                 [(901, "https://web.archive.org/web/20220512171500/https://ones-double.com/people/a/"),
                  (902, "https://web.archive.org/web/20221013093626/https://all-p.jp/talent/")])
         return asked
+
+    def _mock_public_resources(self, upstream):
+        """路由图标测试在公开资源传输边界提供响应；网络守卫另有行为回归。"""
+        from peach import public_http
+        from peach.http import HttpResponse
+        def fetch(url, **_kwargs):
+            response = upstream(httpx.Request('GET', url))
+            return HttpResponse(response.status_code, dict(response.headers), response.content, url)
+        stub = patch.object(public_http, 'get', side_effect=fetch)
+        stub.start()
+        self.addCleanup(stub.stop)
 
     async def test_archived_links_of_two_sites_get_two_marks(self):
         """存档链接的圆标按快照保存的原站缓存，两家关了门的公司不共用 web.archive.org 那一枚。"""
@@ -2051,6 +2062,21 @@ class FastApiContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(head.content, b"")
                 self.assertEqual(head.headers["content-type"], response.headers["content-type"])
 
+    async def test_html_entry_requests_one_browser_cache_reset_per_media_policy(self):
+        first = await self.client.get('/login')
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.headers['clear-site-data'], '"cache"')
+        self.assertIn('HttpOnly', first.headers['set-cookie'])
+        second = await self.client.get('/login')
+        self.assertNotIn('clear-site-data', second.headers)
+
+    async def test_image_responses_isolate_active_document_capabilities(self):
+        response = await self.client.get('/site-icon/github.png?t=secret')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers['content-security-policy'],
+                         "sandbox; default-src 'none'; frame-ancestors 'none'")
+        self.assertEqual(response.headers['x-content-type-options'], 'nosniff')
+
     async def test_playlist_api_saves_and_reads_a_mix_without_exposing_paths(self):
         await self.client.post(
             "/login", content="token=secret&next=%2F",
@@ -2074,6 +2100,18 @@ class FastApiContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.text, "window.vendorReady=true;")
         self.assertEqual(response.headers["cache-control"], "public, max-age=31536000, immutable")
         self.assertEqual((await self.client.get("/vendor/missing.js")).status_code, 404)
+
+    async def test_vendor_scripts_keep_javascript_type_with_system_text_association(self):
+        with patch("starlette.responses.guess_type", return_value=("text/plain", None)):
+            response = await self.client.get("/vendor/player.js")
+            cached = await self.client.get(
+                "/vendor/player.js", headers={"If-None-Match": response.headers["etag"]},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(cached.status_code, 304)
+        for result in (response, cached):
+            self.assertEqual(result.headers["content-type"], "text/javascript; charset=utf-8")
+            self.assertEqual(result.headers["x-content-type-options"], "nosniff")
 
     async def test_standard_range_and_head_contract(self):
         headers = {"X-Token": "secret"}

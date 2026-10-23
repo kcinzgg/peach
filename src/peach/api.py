@@ -45,6 +45,7 @@ from .follow_covers import FollowCoverService
 from .follow_faces import FollowFaceIndex
 from .follow_stream import FollowMediaResolver
 from .http import HttpxTransport
+from .remote_media_cache import MEDIA_SECURITY_HEADERS
 from .health import inspect_database
 from .media import (
     FilesystemBackend,
@@ -201,6 +202,30 @@ def _server_error_headers(request: Request, error: Exception, status_code=500):
     event('http-request', error, error_id=error_id, method=request.method,
           route=getattr(request.scope.get('route'), 'path', '<unmatched>').lstrip('/'), status_code=status_code)
     return {'X-Peach-Error-ID': error_id, 'Cache-Control': 'no-store'}
+
+
+class _VendorFiles(StaticFiles):
+    """随包脚本和样式使用固定媒体类型，不依赖系统文件关联。"""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        suffix = str(full_path).rsplit('.', 1)[-1].lower()
+        media = {'js': 'text/javascript', 'mjs': 'text/javascript', 'css': 'text/css'}.get(suffix)
+        if media:
+            response.headers['content-type'] = f'{media}; charset=utf-8'
+        return response
+
+
+def _secure_media_response(request, response) -> None:
+    """隔离媒体文档，并按策略版本请求浏览器清理缓存、保留登录与偏好。"""
+    content_type = response.headers.get('content-type', '').split(';', 1)[0].lower()
+    if content_type.startswith(('image/', 'video/', 'audio/')):
+        response.headers.update(MEDIA_SECURITY_HEADERS)
+    if (request.method == 'GET' and response.status_code == 200 and content_type == 'text/html'
+            and request.cookies.get('peach_media_policy') != '1'):
+        response.headers['Clear-Site-Data'] = '"cache"'
+        response.set_cookie('peach_media_policy', '1', max_age=365 * 86400, httponly=True,
+                            secure=request.url.scheme == 'https', samesite='strict')
 
 
 def create_app(
@@ -514,7 +539,7 @@ def create_app(
     # 第三方前端依赖固定版本并随 Peach 自托管；局域网断网时仍可播放。
     app.mount(
         "/vendor",
-        StaticFiles(directory=settings.vendor_path, check_dir=False),
+        _VendorFiles(directory=settings.vendor_path, check_dir=False),
         name="vendor",
     )
 
@@ -526,6 +551,7 @@ def create_app(
         elif "cache-control" not in response.headers:
             response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
+        _secure_media_response(request, response)
         response.headers["Referrer-Policy"] = "same-origin"
         # 公网入口开着的时候整个站都在互联网上。这一条覆盖每一个响应——页面、静态
         # 资源和 API 都算，页面里的 `<meta name="robots">` 只管得到 HTML 那几页。

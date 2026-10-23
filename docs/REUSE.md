@@ -54,11 +54,15 @@ Actions 工作流静态检查复用 actionlint 1.7.12（MIT，`rhysd/actionlint:
 
 界面逐字采用 MIT 许可的 BoardUI Tree View、Breadcrumb 与 Direction，固定源码 SHA-256 见 `frontend/src/react/boardui/ORIGIN.md`；复用现有 React 19.3.0、React Aria Components 1.22.1、Motion 14.1.0 与 Remix Icon 4.9.0，无新增依赖。Peach 的原生链接适配上游 `next/link` 槽，领域逻辑仅承担目录归属、冲突保留、范围确认和来源撤回。能力检索覆盖当前媒体库分组、目录否定、字段归属和 `media_libraries.py` 的 Git 历史；物理目录整理继续使用既有入口。验证只使用临时账本与合成馆藏。
 
-Linux Docker 容器复用 Docker 官方 Python `3.14.8-slim-trixie`、uv `0.13.1`（MIT/Apache-2.0），以及 Docker 官方 Buildx、login-action 和 build-push-action 的「先验收再发布」流程。Python 镜像许可证随上游组件保留，FFmpeg 使用 Debian 包及其许可证。Peach 差异仅为配置重载、资料处理请求与持久化路径；不引入新 Python 依赖，不改写真实 ledger。CloudDrive2 使用其官方独立服务，不复制其代码或打包进 Peach。部署与证据范围见 [Docker 部署](DOCKER.md)。
+Linux Docker 容器复用 Docker 官方 Python `3.14.8-slim-trixie`、uv `0.13.4`（MIT/Apache-2.0），以及 Docker 官方 Buildx、login-action 和 build-push-action 的「先验收再发布」流程。Python 镜像许可证随上游组件保留，FFmpeg 使用 Debian 包及其许可证。Peach 差异仅为配置重载、资料处理请求与持久化路径；不引入新 Python 依赖，不改写真实 ledger。CloudDrive2 使用其官方独立服务，不复制其代码或打包进 Peach。部署与证据范围见 [Docker 部署](DOCKER.md)。
 
 收藏窗口复用 React Aria 外壳、Peach 设置弹层布局及共用关闭控件 `SettingsDialogClose`。入口为中性星形按钮；实体分类和保存的筛选分别显示，已标记与稍后看位于导航底部。收藏图像复用实体引用、厂牌标识、本地代表作与已绑定在线来源的本地头像代理，通过全站图片回退链逐项尝试，不写入偏好。原始 BoardUI 源码哈希见 `docs/BOARD_UI.md`。Rule34 视频封面使用来源缩略图，图片保留原文件扩展名；失败图片在关注数据刷新时重新尝试。无新增运行时依赖或真实 ledger 写入。
 
 关注封面代理复用来源登记的媒体主机白名单；第三方图片地址及重定向继续执行公网 DNS 校验。
+
+公开图标与自定义 JSON 来源共用 `public_http.pinned_session`，复用 curl_cffi 0.16.3（MIT）的 `CONNECT_TO` 固定连接目标并保留原域名 TLS 校验。Peach 保留公网地址、跳转、体积、时间与凭据隔离策略；图标每一步跳转使用独立会话。未采用只检查域名后让 HTTPX 自动跟随的路径，因为该路径不能约束连接时解析和后续目标。媒体出口复用浏览器 CSP `sandbox`、`nosniff` 和 Starlette 响应实现，不解析或改写不可信 SVG；代理拒绝活动文档，已有磁盘内容也经过相同检查。模拟 DNS、重定向、缓存及已认证接口由行为测试覆盖，无新增运行时依赖或真实 ledger 写入。
+
+安全依赖版本由两份 `uv.lock` 固定：Pillow 13.0.0（MIT-CMU）负责图像解码，certifi 2026.10.19（MPL-2.0）提供证书包；可选 115 依赖中的 Brotli 1.2.1（MIT）负责压缩解码，独立 amane 桥使用 opentelemetry-api 1.45.1（Apache-2.0）。均为维护中的上游实现，沿用 Python 3.14 与支持平台的 wheel，不引入新的依赖类别；安装体积以锁文件制品与发行构建为准。依据见 [Pillow 安全公告](https://github.com/python-pillow/Pillow/security/advisories/GHSA-78g4-xqwv-q3g8)、[Python 证书事件说明](https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576)及 [Brotli 发布说明](https://github.com/google/brotli/releases/tag/v1.2.1)。
 
 收藏弹层的导航复用设置页液态玻璃、`useViewGlide`、`attachOverlayScrollbar`、入场与退场关键帧及落影，桌面和手机检查实际计算样式。官方预告复用 amane `cc42cee6ecf290cf05af1caa347d2dc2d5aeffcd` 的 Prestige SKU→UUID 协议，通过官方返回的作品身份与公开 MP4 字段取得地址；读取复用既有来源传输、限制和媒体代理，无新增依赖。
 
@@ -325,7 +329,7 @@ MGS 专属发行先查自营商品目录，Prestige 番号复用 `metadata_route
 - 外部项目不适合作为运行时依赖，但其公开数据模型或算法明显更成熟时，固定 revision 后作为参考
   实现；许可证不允许派生或来源不稳定时只作行为证据，不复制代码。
 
-- Python 安装与构建用 [uv](https://github.com/astral-sh/uv)（MIT/Apache-2.0，`pyproject.toml` 只设下限 `>=0.12.13`，不进依赖图）与官方 setup-uv（MIT，版本见 [测试工作流](../.github/workflows/test.yml)）：uv 项目接口、`uv.lock`、`uv sync --locked`，Dependabot 走官方 `uv` 生态。开发与构建在隔离工作树建环境，生产 venv 不参与精确同步；直接依赖精确固定，传递依赖由锁文件复现。
+- Python 安装与构建用 [uv](https://github.com/astral-sh/uv)（MIT/Apache-2.0，`pyproject.toml` 只设下限 `>=0.13.4`，不进依赖图）与官方 setup-uv（MIT，版本见 [测试工作流](../.github/workflows/test.yml)）：uv 项目接口、`uv.lock`、`uv sync --locked`，Dependabot 走官方 `uv` 生态。开发与构建在隔离工作树建环境，生产 venv 不参与精确同步；直接依赖精确固定，传递依赖由锁文件复现。
   测试库复用 `tests/support/ledger.py`：迁移生成模板后复制独立临时库（[耗时](SOURCING.md#依赖与工具实测)），真实迁移测试仍执行迁移；重试测试用已有 sleeper 注入点。CI 用 GitHub Actions 独立 runner 分片与现有 unittest 入口，Peach 只维护影响域策略，不引并发测试框架（见 `TESTING.md`）。
 - 访问密码复用 Python 3.14 的 [hashlib.scrypt](https://docs.python.org/3.14/library/hashlib.html) 与 OpenSSL，浏览器会话复用 [ItsDangerous](https://itsdangerous.palletsprojects.com/en/stable/)（Pallets、BSD-3-Clause、纯 Python、wheel 16 KB、无传递依赖），本机原子配置写入用 tempfile/os.replace 与 filelock；认证入口的访问口令、三种拒绝响应与本机配置守卫照旧复用。Starlette SessionMiddleware 统一时长、随响应续期，满足不了每台设备自选截止时间，所以直接用同源签名库，Peach 管可选密码、截止时间与撤销，不带账户体系与迁移。
 - Cloudflare Quick Tunnel 用官方 `cloudflared`（Apache-2.0），不自写隧道协议。源码环境只管 PATH／环境变量里的进程；Windows 独立包旁路固定 `2026.9.0`，资产、地址与 SHA-256 在 `scripts/cloudflared-windows.json`，`fetch_cloudflared.ps1` 与构建脚本双重校验。就绪判据是官方 `--pidfile`（首次连上边缘才写），未连上不宣称可用。源码 HTTPS origin 用项目 CA，独立包用回环 HTTP，写请求来源校验带当前进程持有的随机 URL。

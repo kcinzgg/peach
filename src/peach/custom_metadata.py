@@ -1,7 +1,6 @@
 """受限 JSON 来源：固定 HTTPS 端点、字段映射及候选身份核对。"""
 from __future__ import annotations
 
-import ipaddress
 import hashlib
 import json
 import re
@@ -10,11 +9,12 @@ import time
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
-from curl_cffi import CurlOpt, ffi, lib, requests
+from curl_cffi import requests
 from filelock import FileLock
 
 from .fsutil import atomic_write_text
-from .http import host_addresses, public_https_url
+from .http import public_https_url
+from .public_http import pinned_session
 from .metadata import identifies_code, validate_provider_code
 from .metadata_routes import CONTENT_TYPES
 from .sources.base import SiteRecord
@@ -159,22 +159,7 @@ def _remaining_seconds(deadline: float) -> float:
 def fetch_json(url: str, timeout: float, *, client_options=None):
     expires = time.monotonic() + timeout
     _remaining_seconds(expires)
-    host = urlsplit(url).hostname or ''
-    addresses = host_addresses(host)
-    _remaining_seconds(expires)
-    if not addresses or any(not ipaddress.ip_address(ip).is_global for ip in addresses):
-        raise ValueError('来源域名必须解析到公网地址')
-    address = addresses[0]
-    if ':' in address:
-        address = f'[{address}]'
-    # CONNECT_TO 固定已验证地址，HTTP 代理也只 CONNECT 到该公网 IP，TLS 仍校验原域名。
-    options = dict(client_options or {'trust_env': False})
-    # curl_cffi 0.16.3 的 CONNECT_TO 接收原生 slist；Session 关闭后才释放。
-    target = ffi.gc(lib.curl_slist_append(ffi.NULL, f'{host}:443:{address}:443'.encode()), lib.curl_slist_free_all)
-    curl_options = {CurlOpt.CONNECT_TO: target}
-    if not options.get('proxy') and not options.get('trust_env'):
-        curl_options[CurlOpt.NOPROXY] = '*'
-    with requests.Session(curl_options=curl_options, **options) as client:
+    with pinned_session(url, client_options=client_options, deadline=expires) as client:
         try:
             with client.stream('GET', url, timeout=_remaining_seconds(expires), allow_redirects=False,
                                headers={'Accept': 'application/json'}) as response:

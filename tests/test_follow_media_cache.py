@@ -102,7 +102,7 @@ class RemoteMediaCacheTests(unittest.IsolatedAsyncioTestCase):
         self.headers['content-type'] = 'video/mp4'
         response = await self.client.get('/media')
         self.assertEqual(response.content, self.payload)
-        self.assertIn('max-age=31536000', response.headers['cache-control'])
+        self.assertEqual(response.headers['cache-control'], 'private, no-cache')
         await self.client.get('/media')
         self.assertEqual(self.calls, 2)
 
@@ -112,6 +112,41 @@ class RemoteMediaCacheTests(unittest.IsolatedAsyncioTestCase):
             await self.client.get("/media")
         self.assertIsNone(self.cache.stored("follow:1:media:0"))
         self.assertFalse(list(self.root.rglob("*.tmp*")))
+
+    async def test_active_documents_are_refused_for_get_and_head(self):
+        self.payload = b'<svg><script>window.audit=1</script></svg>'
+        for kind in ('text/html', 'image/svg+xml', 'IMAGE/SVG+XML; charset=utf-8',
+                     'application/xhtml+xml', 'image/example+xml', ''):
+            self.headers = {'content-type': kind, 'content-length': str(len(self.payload))}
+            for method in ('GET', 'HEAD'):
+                with self.subTest(kind=kind, method=method):
+                    response = await self.client.request(method, '/media')
+                    self.assertEqual(response.status_code, 502)
+                    self.assertNotIn(self.payload, response.content)
+                    self.assertEqual(response.headers['cache-control'], 'no-store')
+                    self.assertIsNone(self.cache.stored('follow:1:media:0'))
+
+    async def test_disk_documents_are_refused_and_passive_media_can_fill_the_slot(self):
+        slot = self.cache._slot('follow:1:media:0')
+        slot.parent.mkdir(parents=True)
+        for kind in ('image/svg+xml', 'text/html'):
+            slot.with_suffix('.bin').write_bytes(b'<script/>')
+            slot.with_suffix('.json').write_text(json.dumps({
+                'size': 9, 'status': 200, 'headers': {'content-type': kind},
+            }), encoding='utf-8')
+            self.assertIsNone(self.cache.stored('follow:1:media:0'))
+            response = await self.client.get('/media')
+            self.assertEqual(response.content, self.payload)
+            self.assertEqual(response.headers['content-type'], 'video/mp4')
+
+    async def test_security_headers_cover_stream_disk_ranges_and_head(self):
+        for method, headers in (('GET', {}), ('GET', {'Range': 'bytes=2-5'}), ('HEAD', {})):
+            response = await self.client.request(method, '/media', headers=headers)
+            self.assertEqual(response.headers['x-content-type-options'], 'nosniff')
+            self.assertEqual(response.headers['content-security-policy'],
+                             "sandbox; default-src 'none'; frame-ancestors 'none'")
+            self.assertEqual(response.headers['cache-control'], 'private, no-cache')
+        self.assertEqual(self.calls, 1)
 
     def test_permanent_bytes_and_refresh_periods(self):
         fetch = mock.Mock(return_value=b"image")
