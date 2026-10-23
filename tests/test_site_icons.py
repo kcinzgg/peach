@@ -339,6 +339,15 @@ class SharedHostGuardTests(unittest.TestCase):
 
 
 class BestMarkTests(unittest.TestCase):
+    def test_unavailable_declared_icons_have_a_network_attempt_limit(self):
+        asked = []
+        page = ''.join(f'<link rel="icon" href="/{index}.png">' for index in range(100)).encode()
+        def fetch(url):
+            asked.append(url)
+            return (page, 'text/html') if url == 'https://e.com' else None
+        self.assertIsNone(site_icons.best_mark('https://e.com', fetch, lambda *a, **k: None))
+        self.assertEqual(len(asked), 1 + site_icons.MAX_FETCH * 3)
+
     def test_missav_uses_the_confirmed_icon_when_the_homepage_is_unavailable(self):
         icon = "https://missav.ws/img/favicon.png"
         for host in ("missav.com", "missav.ws"):

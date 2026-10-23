@@ -34,7 +34,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
-from peach import follow_assets, link_marks, scraping_access, settings_file
+from peach import follow_assets, link_marks, scraping_access, settings_file, taste_history
 from peach import platform as peach_platform
 from peach.config import FFMPEG_DIR
 from peach.ffmpeg import FFmpegResolver
@@ -220,13 +220,12 @@ class WebE2ESmokeTests(unittest.TestCase):
         mark_root = generated / "site-marks"
         mark_root.mkdir(parents=True)
         mark = (ROOT / "resources" / "peach-logo.png").read_bytes()
-        for spec in scraping_access.SOURCES.values():
-            # 聚合来源没有固定站点，页面使用本地字形，不请求站标。
-            if not spec["login"]:
-                continue
-            cached = link_marks.cached_path(mark_root, spec["login"])
+        targets = [spec["login"] for spec in scraping_access.SOURCES.values() if spec["login"]]
+        targets.extend(f"https://{domain}/" for domain in taste_history.TASTE_DOMAIN_SUFFIXES)
+        for target in targets:
+            cached = link_marks.cached_path(mark_root, target)
             if cached is None:
-                raise AssertionError(f"采集来源没有可缓存的主机：{spec['login']}")
+                raise AssertionError(f"站点图标没有可缓存的主机：{target}")
             cached.write_bytes(mark)
         icon_root = generated / follow_assets.ROOT_NAME
         for provider in follow_assets.SOURCE_ICON_URLS:

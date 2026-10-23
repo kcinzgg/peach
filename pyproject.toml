@@ -42,7 +42,7 @@ dependencies = [
   "grpcio==1.84.0",
   "httpx==0.28.1",
   "m3u8==6.0.0",
-  "pillow==12.3.0",
+  "pillow==13.0.0",
   "protobuf==7.36.2",
   "pystray==0.19.5",
   "pydantic==2.14.1",
@@ -95,7 +95,7 @@ package-dir = {"" = "src"}
 # 只设下限：uv 是工具不是依赖，它的版本不进依赖图（scripts/test_runner.py 的
 # dependency_inputs 也不算它）。Homebrew、winget 与官方脚本都只装最新版，写死等号
 # 会让每台新机器上的 uv 连 `--no-project` 的钩子都拒绝运行；CI 想复现就在 setup-uv 里给 version。
-required-version = ">=0.12.13"
+required-version = ">=0.13.4"
 cache-keys = [{file = "pyproject.toml"}, {file = "setup.py"}, {file = "src/peach/__init__.py"}, {file = "README.md"}]
 
 [tool.setuptools.dynamic]

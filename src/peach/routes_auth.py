@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 from collections import OrderedDict
 import threading
 import time
@@ -30,15 +31,20 @@ _ATTEMPTS_LOCK = threading.Lock()
 def _attempt_key(request: Request) -> str:
     """限速按真实来源分桶。
 
-    隧道在跑时所有请求的连接源都是 cloudflared 的回环地址，按它计数等于把整个公网
-    合成一个桶：外面一台机器试满十次，本机浏览器也跟着被锁一分钟。这时改用边缘给出
-    的客户端地址，隧道没在跑就仍按连接源，避免任何人自带一个头就换一个桶。
+    隧道运行且连接来自回环或服务自己的地址时才读取边缘客户端地址。源码隧道连接本机
+    HTTPS 地址；其他局域网客户端按连接源计数。转发地址必须有效并归一化。
     """
-    if tunnel.running(getattr(request.app.state, "tunnel", None)):
+    peer = request.client.host if request.client else "unknown"
+    server = request.scope.get('server')
+    local_peer = peer in ("127.0.0.1", "::1") or bool(
+        server and peer == server[0] and peer not in ('0.0.0.0', '::'))
+    if local_peer and tunnel.running(getattr(request.app.state, "tunnel", None)):
         forwarded = (request.headers.get("cf-connecting-ip") or "").strip()
-        if forwarded:
-            return f"cf:{forwarded}"
-    return request.client.host if request.client else "unknown"
+        try:
+            return f"cf:{ipaddress.ip_address(forwarded)}"
+        except ValueError:
+            pass
+    return peer
 
 
 def _login_attempt(request: Request) -> None:

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 from peach import custom_metadata as custom
+from peach import public_http
 from peach.library_processing import _RemoteSession
 from peach.metadata_policy import CHAIN_UNKNOWN, source_tier
 from peach.metadata_auto_apply import _evidence_candidates
@@ -48,7 +49,7 @@ class CustomMetadataTests(unittest.TestCase):
         self.assertEqual(_evidence_candidates({'candidates': [{'source': record.source, 'value': '标题'}]}, 'title'), [])
 
     def test_private_dns_is_refused_before_connecting(self):
-        with patch.object(custom, 'host_addresses', return_value=('127.0.0.1',)), patch.object(custom.requests, 'Session') as session:
+        with patch.object(public_http, 'host_addresses', return_value=('127.0.0.1',)), patch.object(public_http.requests, 'Session') as session:
             with self.assertRaisesRegex(ValueError, '公网'):
                 custom.fetch_json('https://metadata.example.com/ABW-001', 2)
             session.assert_not_called()
@@ -71,7 +72,7 @@ class CustomMetadataTests(unittest.TestCase):
             return session
         with patch.object(custom.time, 'monotonic', side_effect=lambda: clock[0]), \
                 patch('peach.peach_proxy.client_options', side_effect=proxy_options), \
-                patch.object(custom, 'host_addresses', side_effect=addresses), \
+                patch.object(public_http, 'host_addresses', side_effect=addresses), \
                 patch.object(custom.requests, 'Session', side_effect=prepare_session):
             record = custom.query(definition(network='peach_proxy'), 'ABW-001', secrets_root=Path('.'))
         self.assertEqual(record.title, 'example')
@@ -86,7 +87,7 @@ class CustomMetadataTests(unittest.TestCase):
                 clock[0] += dns_elapsed
                 return ('1.1.1.1',)
             with patch.object(custom.time, 'monotonic', side_effect=lambda: clock[0]), \
-                    patch.object(custom, 'host_addresses', side_effect=addresses), \
+                    patch.object(public_http, 'host_addresses', side_effect=addresses), \
                     patch.object(custom.requests, 'Session') as session:
                 session.return_value.__enter__.return_value.stream.return_value.__enter__.return_value = response
                 with self.assertRaisesRegex(ValueError, '超时'):
@@ -130,13 +131,13 @@ class CustomMetadataTests(unittest.TestCase):
     def test_public_connection_is_pinned_with_proxy_and_redirects_refused(self):
         response = Mock(status_code=200)
         response.iter_content.return_value = [b'{"ok":true}']
-        with patch.object(custom, 'host_addresses', return_value=('1.1.1.1',)), patch.object(custom.requests, 'Session') as session:
+        with patch.object(public_http, 'host_addresses', return_value=('1.1.1.1',)), patch.object(public_http.requests, 'Session') as session:
             session.return_value.__enter__.return_value.stream.return_value.__enter__.return_value = response
             self.assertEqual(custom.fetch_json('https://metadata.example.com/ABW-001', 3,
                 client_options={'proxy': 'http://127.0.0.1:7890', 'trust_env': False}), {'ok': True})
             options = session.call_args.kwargs
-            target = options['curl_options'][custom.CurlOpt.CONNECT_TO]
-            self.assertEqual(custom.ffi.string(target.data), b'metadata.example.com:443:1.1.1.1:443')
+            target = options['curl_options'][public_http.CurlOpt.CONNECT_TO]
+            self.assertEqual(public_http.ffi.string(target.data), b'metadata.example.com:443:1.1.1.1:443')
             stream = session.return_value.__enter__.return_value.stream
             self.assertFalse(stream.call_args.kwargs['allow_redirects'])
             self.assertNotIn('verify', stream.call_args.kwargs)
@@ -147,7 +148,7 @@ class CustomMetadataTests(unittest.TestCase):
     def test_response_limit_and_code_format(self):
         response = Mock(status_code=200)
         response.iter_content.return_value = [b'x' * (custom.MAX_BYTES + 1)]
-        with patch.object(custom, 'host_addresses', return_value=('1.1.1.1',)), patch.object(custom.requests, 'Session') as session:
+        with patch.object(public_http, 'host_addresses', return_value=('1.1.1.1',)), patch.object(public_http.requests, 'Session') as session:
             session.return_value.__enter__.return_value.stream.return_value.__enter__.return_value = response
             with self.assertRaisesRegex(ValueError, '1 MiB'):
                 custom.fetch_json('https://metadata.example.com/ABW-001', 3)

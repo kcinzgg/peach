@@ -361,8 +361,8 @@ def best_mark(url: str, fetch, render, fallback=None, accept=None) -> bytes | No
     """
     tried = 0
     first: tuple[bytes, str] | None = None
-    for candidate in discover(url, fetch):
-        if tried >= MAX_FETCH:
+    for attempt, candidate in enumerate(discover(url, fetch)):
+        if tried >= MAX_FETCH or attempt >= MAX_FETCH * 3:
             break
         got = fetch(candidate.url)
         if got is None:

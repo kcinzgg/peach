@@ -945,6 +945,33 @@ class LocalClientTests(unittest.TestCase):
         request = self.request("stopped", {"cf-connecting-ip": "198.51.100.7"})
         self.assertEqual(routes_auth._attempt_key(request), "127.0.0.1")
 
+    def test_direct_lan_clients_cannot_select_the_login_rate_bucket(self):
+        routes_auth._ATTEMPTS.clear()
+        self.addCleanup(routes_auth._ATTEMPTS.clear)
+        request = self.request('running', {})
+        request.client.host = '192.0.2.20'
+        for index in range(10):
+            request.headers['cf-connecting-ip'] = f'198.51.100.{index}'
+            routes_auth._login_attempt(request)
+        request.headers['cf-connecting-ip'] = '198.51.100.99'
+        with self.assertRaises(routes_auth.HTTPException) as failure:
+            routes_auth._login_attempt(request)
+        self.assertEqual(failure.exception.status_code, 429)
+
+    def test_edge_client_addresses_are_validated_and_normalized(self):
+        request = self.request('running', {'cf-connecting-ip': 'arbitrary'})
+        self.assertEqual(routes_auth._attempt_key(request), '127.0.0.1')
+        request.headers['cf-connecting-ip'] = '2001:db8:0:0:0:0:0:1'
+        self.assertEqual(routes_auth._attempt_key(request), 'cf:2001:db8::1')
+
+    def test_source_tunnel_can_connect_to_the_servers_own_lan_address(self):
+        request = self.request('running', {'cf-connecting-ip': '198.51.100.7'})
+        request.client.host = '192.0.2.10'
+        request.scope['server'] = ('192.0.2.10', 443)
+        self.assertEqual(routes_auth._attempt_key(request), 'cf:198.51.100.7')
+        request.client.host = '192.0.2.20'
+        self.assertEqual(routes_auth._attempt_key(request), '192.0.2.20')
+
 
 class AccessTunnelInterlockTests(unittest.TestCase):
     """关掉访问密码就没有第二道闸门，公网入口必须当场收掉。"""
