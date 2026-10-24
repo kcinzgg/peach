@@ -318,7 +318,9 @@ class LibraryNfoTests(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt), patch('peach.library_processing._generate_previews', side_effect=previews):
             process_library(config, db, self.root / 'generated', self.root / 'covers',
                             provider_factory=lambda: provider, database=LedgerDatabase(db))
-        self.assertEqual(seen, [[('本地 ABW-358',), ('本地 ABW-359',)]])
+        self.assertTrue(seen)
+        for titles in seen:
+            self.assertEqual(titles, [('本地 ABW-358',), ('本地 ABW-359',)])
         self.assertTrue(read_rows(self.root / 'generated/library-metadata-field-candidates.csv'))
 
     @windows_ledger_roots

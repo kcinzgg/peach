@@ -7,6 +7,8 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import threading
+from threading import local as thread_local
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -304,7 +306,7 @@ class LibraryMetadataProvider:
     `CredentialStore` 自己会拼上那一层。多给一层的表现不是报错，是每个来源都读成
     「没有凭据」——采集设置里贴好的 JavBus、javdb Cookie 一条都不会被带上。
     """
-    def __init__(self, secrets_root, *, tools_root=None):
+    def __init__(self, secrets_root, *, tools_root=None, limiter=None, budget=None, bridge_lock=None):
         from .scraping_access import SourceTransport
         from .jav_cover_fetch import HostLimitedTransport
         self.secrets_root = Path(secrets_root)
@@ -314,6 +316,11 @@ class LibraryMetadataProvider:
             SourceTransport(secrets_root, max_requests=MAX_SOURCE_REQUESTS,
                             max_bytes=MAX_SOURCE_BYTES, max_seconds=MAX_SOURCE_SECONDS),
             2.0, intervals=SOURCE_INTERVALS)
+        self.bridge_lock = bridge_lock or threading.Lock()
+        if limiter is not None:
+            self.transport.limiter = limiter
+        if budget is not None:
+            self.transport.inner.budget = budget
 
     #: 由本机浏览器过验证的来源累计等人点验证的秒数（`_excuse`）。调用方拿它前后相减，把这段时间
     #: 从单项动作预算里扣掉：一个站第一次弹验证窗口时，那一问要等 `min(40, timeout) + 120` 秒，
@@ -354,6 +361,12 @@ class LibraryMetadataProvider:
         return cache[key]
 
     def _amane_query(self, code, sites, deadline):
+        with self.bridge_lock:
+            from .processing_control import checkpoint
+            checkpoint('network')
+            return self._amane_query_serial(code, sites, deadline)
+
+    def _amane_query_serial(self, code, sites, deadline):
         """起一次桥子进程并把报告翻成这一档的结果或异常（异常作为返回值，由调用方缓存后再抛）。"""
         from . import metadata_amane, peach_proxy
         from .config import TOOLS_DIR
@@ -677,6 +690,8 @@ class LibraryMetadataProvider:
                 raise _unreached(problems)
             raise CoverKept(f'来源给的封面 {size[0]}×{size[1]} 未提高本机封面质量')
         from .cover_artwork import install_cover
+        from .processing_control import checkpoint
+        checkpoint()
         title = artwork_title(snapshots)
         install_cover(target, code, data, size, evidence=dict(source=candidate.source, title=title,
             source_url=candidate.url, width=size[0], height=size[1], verified_by=list(verified_by),
@@ -704,10 +719,7 @@ def misses_path(config):
 
 
 def _save(path, payload):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
-    temporary.replace(path)
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False))
 
 
 def decorate(state, *, now=None):
@@ -1205,6 +1217,7 @@ class _MissCache:
     """
 
     def __init__(self, path, *, ttl=MISS_TTL_SECONDS, now=time.time, sites=None):
+        self._lock = threading.RLock()
         self._path = path
         self._ttl = ttl
         self._now = now
@@ -1246,6 +1259,10 @@ class _MissCache:
                 and all(self._joined.get(site, 0.0) < stamp for site in lineup))
 
     def record(self, source, code):
+        with self._lock:
+            self._record(source, code)
+
+    def _record(self, source, code):
         now = self._now()
         self._entries.setdefault(source, {})[code] = now
         _save(self._path, {
@@ -1293,12 +1310,25 @@ class _RemoteSession:
         self._consult = not retrying
         self._task_evidence = {}
         self._task_absent = set()
+        from .metadata_parallel import RequestBudget
+        from .scripting import HostLimiter
+        self.limiter = HostLimiter(SOURCE_INTERVALS, default_interval=2.0)
+        self.budget = RequestBudget(MAX_SOURCE_REQUESTS, MAX_SOURCE_BYTES, MAX_SOURCE_SECONDS)
+        self.bridge_lock = threading.Lock()
+
+    def fork(self):
+        child = _RemoteSession(self._config, self._factory, self.misses,
+                               retrying=not self._consult, routes=self._routes)
+        child.limiter, child.budget, child.bridge_lock = self.limiter, self.budget, self.bridge_lock
+        child._task_evidence, child._task_absent = self._task_evidence, self._task_absent
+        return child
 
     def provider(self):
         if self._provider is None:
             self._provider = (self._factory() if self._factory
                               else LibraryMetadataProvider(self._config.directory('secrets'),
-                                                           tools_root=self._config.directory('tools')))
+                                  tools_root=self._config.directory('tools'), limiter=self.limiter,
+                                  budget=self.budget, bridge_lock=self.bridge_lock))
         return self._provider
 
     def reset(self):
@@ -2199,6 +2229,71 @@ class _LocalEvidenceCache:
         return local
 
 
+def _collect_prepared(prepared, remote, cover_root, state, *, update, issue, publish,
+                      answered, guard, checkpoints, flush_candidates, covered,
+                      poster_failed, completed_count):
+    """影片并发联网，资料发布和影片检查点在调用线程串行提交。"""
+    from .metadata_parallel import collect_parallel, workers_for
+    local = thread_local()
+    sessions = []
+    sessions_lock = threading.Lock()
+    completed = completed_count
+
+    def work(item, call):
+        row, code, verify_existing, local_fields, local_entries, local_ok = item
+        if not hasattr(local, 'remote'):
+            local.remote = remote.fork()
+            with sessions_lock:
+                sessions.append(local.remote)
+        failed = False
+
+        def progress(**values):
+            call(update, current_asset_id=row['id'], current_asset_name=Path(str(row['name'] or '')).name,
+                 **values)
+
+        def failed_item(asset, message, **options):
+            nonlocal failed
+            failed = True
+            call(issue, asset, message, **options)
+
+        progress(stage='采集缺失资料')
+        missing = list(COLLECTED_FIELDS) if verify_existing else _missing_fields(row, local_fields)
+        found, covers = local.remote.collect(row, code, missing, cover_root,
+            update=progress, issue=failed_item,
+            answered=() if verify_existing else call(answered, row, missing),
+            received=lambda entries: call(publish, row, code, local_fields, verify_existing, entries))
+        return found, covers, failed
+
+    def complete(item, result):
+        nonlocal completed
+        row, code, verify_existing, local_fields, local_entries, local_ok = item
+        found, covers, failed = result
+        state['covers'] += covers
+        covered.append((row['id'], covers))
+        update(stage='保存待确认资料', current_action='writing_candidates',
+               current_started_at=time.time(), current_deadline_at=None)
+        entries = local_entries + found if local_ok and not failed and row['id'] not in poster_failed else []
+        checkpoints.queue_metadata(row, entries, state['issue_count'])
+        flush_candidates()
+        completed += 1
+        update(checked=completed, current_asset_id=None, current_asset_name='', current_action='',
+               current_started_at=None, current_deadline_at=None)
+
+    def check():
+        guard.check()
+        from .processing_control import checkpoint
+        checkpoint()
+
+    update(stage='采集缺失资料', checked=completed_count, total=completed_count + len(prepared))
+    try:
+        collect_parallel(prepared, key=lambda item: normalise_code_key(item[1]) if item[1] else item[0]['id'],
+                         work=work, complete=complete,
+                         capacity=lambda: workers_for(state['speed_mode']), checkpoint=check)
+    finally:
+        for session in sessions:
+            session.close()
+
+
 def process_library(config, db_path, candidate_root, cover_root, *, location='configured',
                     report=lambda state: None, provider_factory=None, job_id=None,
                     retry_ids=None, active=lambda: True, stage=ALL_STAGES,
@@ -2426,28 +2521,10 @@ def process_library(config, db_path, candidate_root, cover_root, *, location='co
                 pending.pop('previews', None)
                 update(estimate_pending=dict(pending), stage='准备采集外部资料', checked=0, total=0)
                 finish_step('media')
-            for position, (row, code, verify_existing, local_fields, local_entries, local_ok) in enumerate(prepared):
-                local_ok = local_ok and row['id'] not in poster_failed
-                guard.check()
-                issues_before = state['issue_count']
-                update(stage='采集缺失资料', checked=completed_count + position,
-                       total=completed_count + len(prepared), current_asset_id=row['id'],
-                       current_asset_name=Path(str(row['name'] or '')).name)
-                target_key = f"asset:{row['id']}"
-                missing = list(COLLECTED_FIELDS) if verify_existing else _missing_fields(row, local_fields)
-                found, covers = remote.collect(row, code, missing, cover_root, update=update, issue=issue,
-                    answered=() if verify_existing else _answered_sources(groups, target_key, missing),
-                    received=lambda entries, row=row, code=code, fields=local_fields, verify=verify_existing:
-                        publish(row, code, fields, verify, entries))
-                state['covers'] += covers
-                covered.append((row['id'], covers))
-                update(stage='保存待确认资料', current_action='writing_candidates',
-                       current_started_at=time.time(), current_deadline_at=None)
-                checkpoints.queue_metadata(row, local_entries + found if local_ok else [], issues_before)
-                flush_candidates()
-                update(checked=completed_count + position + 1, candidates=len(scoped_groups()),
-                       current_asset_id=None, current_asset_name='', current_action='',
-                       current_started_at=None, current_deadline_at=None)
+            _collect_prepared(prepared, remote, cover_root, state, update=update, issue=issue,
+                publish=publish, answered=lambda row, missing: _answered_sources(groups, f"asset:{row['id']}", missing),
+                guard=guard, checkpoints=checkpoints, flush_candidates=flush_candidates, covered=covered,
+                poster_failed=poster_failed, completed_count=completed_count)
             flush_candidates(force=True)
             update(estimate_pending={}, stage='整理采集结果', checked=0, total=0)
             # 候选完整落盘后立即执行调用方注入的窄规则，不再等人打开复核页才触发。
