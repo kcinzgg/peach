@@ -71,7 +71,7 @@ ACCEPTED: dict[str, tuple[int, str]] = {
         42, "应用工厂：按启动顺序构造数据库、各项后台服务（含可选分享）与路由并接成一个 app，每个可注入的"
             "依赖各带一个缺省；挂载探测按配置状态启动。拆开会把同一条构造顺序分散到几处"),
     "src/peach/library_processing.py:process_library": (
-        47, "顺序流水线：本地资料、本地预览、联网采集、写候选、收尾共用一份进度状态"
+        41, "顺序流水线：本地资料、本地预览、联网采集、写候选、收尾共用一份进度状态"
             "与问题记录；来源扫描、资产查询与外部会话分别归 `_scan_sources`、"
             "`_collection_rows`、`_RemoteSession`，剩下的是任务编排与逐项目资料处理"),
     "src/peach/jav_cover_fetch.py:run": (
