@@ -681,7 +681,7 @@ class LibraryNfoTests(unittest.TestCase):
         database.after_commit = lambda: commits.append(alive['value'])
 
         def report(state):
-            if state.get('stage') == '保存待确认资料':
+            if state.get('parallel', {}).get('finished') == 1:
                 alive['value'] = False
 
         with self.assertRaises(InterruptedError):
@@ -1029,7 +1029,7 @@ class LibraryNfoTests(unittest.TestCase):
         config = PeachConfig(self.root, self.root / 'config.toml', present=True)
         scraping_access.save(config.directory('secrets'), 'javbus', {'cookie': 'existmag=all; age=verified'})
         session = _RemoteSession(config, None, None, retrying=False)
-        root = session.provider().transport.inner.root
+        root = session.provider().transport.root
         self.assertTrue(list(scraping_access.cookie_jar(scraping_access.values_for(root, 'javbus'), 'javbus')))
 
     @windows_ledger_roots
@@ -2317,14 +2317,17 @@ class LibraryWatchdogTests(unittest.TestCase):
         names = {row['current_asset_name'] for row in reports if row['current_asset_name']}
         self.assertEqual(names, {'ABW-001.mp4', 'ABW-002.mp4'})
         self.assertIn('reading_local', actions)
-        self.assertIn('querying_metadata', actions)
-        self.assertIn('fetching_cover', actions)
+        workers = [item for row in reports for item in row.get('parallel', {}).get('items', [])]
+        self.assertEqual({item['name'] for item in workers}, names)
+        self.assertIn('querying_metadata', {item['action'] for item in workers})
+        self.assertIn('fetching_cover', {item['action'] for item in workers})
         sequences = [row['progress_seq'] for row in reports]
         self.assertEqual(sequences, sorted(sequences))
         self.assertEqual(len(set(sequences)), len(sequences))
         self.assertEqual(result['status'], 'complete')
         self.assertIsNone(result['current_asset_id'])
         self.assertEqual(result['current_action'], '')
+        self.assertEqual(result['parallel']['active'], 0)
 
     @windows_ledger_roots
     def test_issue_preview_is_capped_while_the_log_keeps_every_row(self):

@@ -296,18 +296,14 @@ class LibraryMetadataProvider:
     `CredentialStore` 自己会拼上那一层。多给一层的表现不是报错，是每个来源都读成
     「没有凭据」——采集设置里贴好的 JavBus、javdb Cookie 一条都不会被带上。
     """
-    def __init__(self, secrets_root, *, tools_root=None, limiter=None, bridge_lock=None):
+    def __init__(self, secrets_root, *, tools_root=None, gate=None, bridge_lock=None):
         from .scraping_access import SourceTransport
-        from .jav_cover_fetch import HostLimitedTransport
+        from .metadata_network import MetadataSourceGate
         self.secrets_root = Path(secrets_root)
         #: amane 桥的 venv 所在的工具区（`<Peach 数据目录>/tools`）；不给就用配置里的默认位置。
         self.tools_root = Path(tools_root) if tools_root is not None else None
-        self.transport = HostLimitedTransport(
-            SourceTransport(secrets_root),
-            2.0, intervals=SOURCE_INTERVALS)
+        self.transport = SourceTransport(secrets_root, gate=gate or MetadataSourceGate(SOURCE_INTERVALS))
         self.bridge_lock = bridge_lock or threading.Lock()
-        if limiter is not None:
-            self.transport.limiter = limiter
 
     #: 由本机浏览器过验证的来源累计等人点验证的秒数（`_excuse`）。调用方拿它前后相减，把这段时间
     #: 从单项动作预算里扣掉：一个站第一次弹验证窗口时，那一问要等 `min(40, timeout) + 120` 秒，
@@ -348,10 +344,29 @@ class LibraryMetadataProvider:
         return cache[key]
 
     def _amane_query(self, code, sites, deadline):
-        with self.bridge_lock:
-            from .processing_control import checkpoint
-            checkpoint('network')
-            return self._amane_query_serial(code, sites, deadline)
+        from contextlib import ExitStack, nullcontext
+        from .processing_control import CURRENT, checkpoint
+        from .scraping_access import SourcePaused, paused_until
+        control = CURRENT.get()
+        report = getattr(control, 'network', lambda **values: None)
+        report(network_status='waiting_source', source='amane')
+        with getattr(control, 'source_wait', nullcontext)():
+            while not self.bridge_lock.acquire(blocking=False):
+                checkpoint()
+                time.sleep(.05)
+        try:
+            with ExitStack() as stack:
+                for site in sorted(sites):
+                    stack.enter_context(self.transport.gate.slot(source=site))
+                sites = [site for site in sites if not paused_until(self.secrets_root, site)]
+                if not sites:
+                    return SourcePaused('来源正在冷却，请稍后重试；已有图片保留')
+                checkpoint('network')
+                report(network_status='requesting_source', source='、'.join(sites))
+                return self._amane_query_serial(code, sites, deadline)
+        finally:
+            self.bridge_lock.release()
+            report(network_status='processing', source='')
 
     def _amane_query_serial(self, code, sites, deadline):
         """起一次桥子进程并把报告翻成这一档的结果或异常（异常作为返回值，由调用方缓存后再抛）。"""
@@ -1297,14 +1312,14 @@ class _RemoteSession:
         self._consult = not retrying
         self._task_evidence = {}
         self._task_absent = set()
-        from .scripting import HostLimiter
-        self.limiter = HostLimiter(SOURCE_INTERVALS, default_interval=2.0)
+        from .metadata_network import MetadataSourceGate
+        self.gate = MetadataSourceGate(SOURCE_INTERVALS)
         self.bridge_lock = threading.Lock()
 
     def fork(self):
         child = _RemoteSession(self._config, self._factory, self.misses,
                                retrying=not self._consult, routes=self._routes)
-        child.limiter, child.bridge_lock = self.limiter, self.bridge_lock
+        child.gate, child.bridge_lock = self.gate, self.bridge_lock
         child._task_evidence, child._task_absent = self._task_evidence, self._task_absent
         return child
 
@@ -1312,7 +1327,7 @@ class _RemoteSession:
         if self._provider is None:
             self._provider = (self._factory() if self._factory
                               else LibraryMetadataProvider(self._config.directory('secrets'),
-                                  tools_root=self._config.directory('tools'), limiter=self.limiter,
+                                  tools_root=self._config.directory('tools'), gate=self.gate,
                                   bridge_lock=self.bridge_lock))
         return self._provider
 
@@ -2218,7 +2233,11 @@ def _collect_prepared(prepared, remote, cover_root, state, *, update, issue, pub
                       answered, guard, checkpoints, flush_candidates, covered,
                       poster_failed, completed_count):
     """影片并发联网，资料发布和影片检查点在调用线程串行提交。"""
-    from .metadata_parallel import collect_parallel, workers_for
+    from .metadata_parallel import collect_parallel, CollectionProgress
+    from .processing_control import CURRENT, DEFAULT_METADATA_CONCURRENCY
+    control = CURRENT.get()
+    capacity = lambda: control.metadata_concurrency if control is not None else DEFAULT_METADATA_CONCURRENCY
+    progress = CollectionProgress(update, capacity)
     local = thread_local()
     sessions = []
     sessions_lock = threading.Lock()
@@ -2232,19 +2251,18 @@ def _collect_prepared(prepared, remote, cover_root, state, *, update, issue, pub
                 sessions.append(local.remote)
         failed = False
 
-        def progress(**values):
-            call(update, current_asset_id=row['id'], current_asset_name=Path(str(row['name'] or '')).name,
-                 **values)
+        def item_progress(**values):
+            call(progress.progress, item, **values)
 
         def failed_item(asset, message, **options):
             nonlocal failed
             failed = True
             call(issue, asset, message, **options)
 
-        progress(stage='采集缺失资料')
+        item_progress(stage='采集缺失资料')
         missing = list(COLLECTED_FIELDS) if verify_existing else _missing_fields(row, local_fields)
         found, covers = local.remote.collect(row, code, missing, cover_root,
-            update=progress, issue=failed_item,
+            update=item_progress, issue=failed_item,
             answered=() if verify_existing else call(answered, row, missing),
             received=lambda entries: call(publish, row, code, local_fields, verify_existing, entries))
         return found, covers, failed
@@ -2255,14 +2273,13 @@ def _collect_prepared(prepared, remote, cover_root, state, *, update, issue, pub
         found, covers, failed = result
         state['covers'] += covers
         covered.append((row['id'], covers))
-        update(stage='保存待确认资料', current_action='writing_candidates',
-               current_started_at=time.time(), current_deadline_at=None)
         entries = local_entries + found if local_ok and not failed and row['id'] not in poster_failed else []
         checkpoints.queue_metadata(row, entries, state['issue_count'])
         flush_candidates()
         completed += 1
         update(checked=completed, current_asset_id=None, current_asset_name='', current_action='',
                current_started_at=None, current_deadline_at=None)
+        progress.complete(item, failed=failed, covers=covers)
 
     def check():
         guard.check()
@@ -2273,7 +2290,7 @@ def _collect_prepared(prepared, remote, cover_root, state, *, update, issue, pub
     try:
         collect_parallel(prepared, key=lambda item: normalise_code_key(item[1]) if item[1] else item[0]['id'],
                          work=work, complete=complete,
-                         capacity=lambda: workers_for(state['speed_mode']), checkpoint=check)
+                         capacity=capacity, checkpoint=check, changed=progress.changed, network=progress.progress)
     finally:
         for session in sessions:
             session.close()

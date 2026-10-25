@@ -23,6 +23,9 @@ from peach.jobs import (
 
 
 class JobPolicyTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch('peach.settings_file.active', return_value=SimpleNamespace(locations={}, media_costs={})))
+
     def test_metered_source_requires_explicit_authorization(self):
         policy = SourceAccessPolicy()
         with self.assertRaises(MeteredSourceDenied):

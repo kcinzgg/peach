@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from peach.metadata_parallel import collect_parallel, workers_for
+from peach.metadata_parallel import collect_parallel
 from peach.processing_control import CURRENT
 from peach.library_processing import process_library
 from peach.review_csv import read_rows
@@ -18,6 +18,41 @@ from support.ledger import fresh_ledger
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_six_and_one_hundred_workers_overlap_without_queued_overflow(self):
+        for limit in (6, 100):
+            with self.subTest(limit=limit):
+                barrier = threading.Barrier(limit)
+                threads, snapshots = set(), []
+                lock = threading.Lock()
+                def work(item, call, lock=lock, threads=threads, barrier=barrier):
+                    with lock:
+                        threads.add(threading.get_ident())
+                    barrier.wait(timeout=10)
+                collect_parallel(range(limit), key=lambda n: n, work=work, complete=lambda *_: None,
+                                 capacity=lambda limit=limit: limit, checkpoint=lambda: None,
+                                 changed=lambda active, pending, snapshots=snapshots: snapshots.append((len(active), pending)))
+                self.assertEqual(len(threads), limit)
+                self.assertEqual(snapshots[-1], (0, 0))
+                self.assertLessEqual(max(n for n, _ in snapshots), limit)
+
+    def test_reducing_capacity_finishes_inflight_before_admitting_more(self):
+        limit = [6]
+        started, finished, snapshots = [], [], []
+        def work(item, call):
+            call(started.append, item)
+            time.sleep(.01)
+            return item
+        def complete(item, result):
+            finished.append(item)
+            limit[0] = 2
+        collect_parallel(range(12), key=lambda n: n, work=work, complete=complete,
+                         capacity=lambda: limit[0], checkpoint=lambda: None,
+                         changed=lambda active, pending: snapshots.append((len(started), len(finished), len(active))))
+        self.assertEqual(sorted(finished), list(range(12)))
+        for admitted, done, active in snapshots:
+            if admitted > 6:
+                self.assertLessEqual(active, 2)
+
     def test_jobs_overlap_and_callbacks_run_on_owner(self):
         owner = threading.get_ident()
         barrier = threading.Barrier(2)
@@ -103,11 +138,50 @@ class SchedulerTests(unittest.TestCase):
             CURRENT.reset(token)
         self.assertEqual(checked, [('network', owner)])
 
-    def test_speed_modes_bound_concurrency(self):
-        self.assertEqual([workers_for(mode) for mode in ('low', 'standard', 'high')], [1, 2, 4])
+    def test_concurrency_default_and_bounds(self):
+        from peach.processing_control import DEFAULT_METADATA_CONCURRENCY, valid_concurrency
+        self.assertEqual(DEFAULT_METADATA_CONCURRENCY, 6)
+        self.assertEqual(valid_concurrency(100), 100)
+        for value in (0, 101, True, '6', 1.5, None):
+            with self.assertRaises(ValueError):
+                valid_concurrency(value)
 
 
 class SourcePacingTests(unittest.TestCase):
+    def test_source_wait_does_not_consume_action_deadline(self):
+        from peach.metadata_parallel import _WorkerControl
+        from peach.processing_control import deadline_after
+        clock = [100]
+        control = _WorkerControl(None, lambda fn, *args: fn(*args), lambda **kw: None)
+        token = CURRENT.set(control)
+        try:
+            with patch('time.monotonic', side_effect=lambda: clock[0]):
+                deadline = deadline_after(20)
+                with control.source_wait():
+                    clock[0] = 1000
+                    self.assertEqual(deadline - clock[0], 20)
+                self.assertEqual(deadline - clock[0], 20)
+                clock[0] += 5
+                self.assertEqual(deadline - clock[0], 15)
+        finally:
+            CURRENT.reset(token)
+
+    def test_progress_keeps_each_worker_and_aggregates_results(self):
+        from peach.metadata_parallel import CollectionProgress
+        updates = []
+        tracker = CollectionProgress(lambda **v: updates.append(v), lambda: 6)
+        first, second = ({'id': 1, 'name': 'one.mp4'}, 'A-001'), ({'id': 2, 'name': 'two.mp4'}, 'A-002')
+        tracker.changed([first, second], 20)
+        tracker.progress(first, network_status='waiting_source', source='dmm')
+        tracker.progress(second, network_status='requesting_source', source='r18dev', current_action='fetching_cover')
+        parallel = updates[-1]['parallel']
+        self.assertEqual((parallel['active'], parallel['waiting'], parallel['requesting']), (2, 1, 1))
+        self.assertEqual(parallel['items'][0]['source'], 'dmm')
+        tracker.complete(second, failed=True, covers=1)
+        self.assertEqual(updates[-1]['parallel']['failed'], 1)
+        self.assertEqual(updates[-1]['parallel']['results'][0]['covers'], 1)
+        self.assertEqual(parallel['items'][1]['source'], 'r18dev')
+
     def test_workers_share_host_limiter_and_bridge_lock(self):
         from peach.library_processing import _RemoteSession
         with tempfile.TemporaryDirectory() as directory:
@@ -116,9 +190,9 @@ class SourcePacingTests(unittest.TestCase):
             parent = _RemoteSession(config, None, {}, retrying=False)
             child = parent.fork()
             first, second = parent.provider(), child.provider()
-            self.assertIs(first.transport.limiter, second.transport.limiter)
+            self.assertIs(first.transport.gate, second.transport.gate)
             self.assertIs(first.bridge_lock, second.bridge_lock)
-            self.assertIsNot(first.transport.inner, second.transport.inner)
+            self.assertIsNot(first.transport, second.transport)
 
 
 class LibraryParallelTests(unittest.TestCase):

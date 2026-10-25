@@ -17,6 +17,38 @@ from support.ledger import fresh_ledger
 
 
 class ProcessingControlTests(unittest.TestCase):
+    def test_concurrency_persists_and_does_not_resume_paused_task(self):
+        path = self.root / 'control.json'
+        first = ProcessingControl(path)
+        self.assertEqual(first.metadata_concurrency, 6)
+        first.select_job('one')
+        first.request('pause', 'one')
+        first.request('set_concurrency', 'one', concurrency=100)
+        second = ProcessingControl(path)
+        self.assertEqual(second.metadata_concurrency, 100)
+        self.assertTrue(second.paused)
+        second.request('set_concurrency', 'one', concurrency=2)
+        first.refresh(force=True)
+        self.assertEqual(first.metadata_concurrency, 2)
+        for value in (0, 101, True, 6.5, '6'):
+            with self.assertRaises(ValueError):
+                first.request('set_concurrency', concurrency=value)
+        self.assertEqual(ProcessingControl(path).metadata_concurrency, 2)
+
+    def test_concurrency_api_validates_job_identity_and_roundtrips_preference(self):
+        from peach.jobs import BackgroundJob
+        from peach.web_library_processing import q_library_processing
+        job = BackgroundJob('library-processing')
+        contract = SimpleNamespace(db_path=self.db, library_processing_job=job)
+        with patch('peach.web_library_processing.settings_file.active', return_value=self.config):
+            state = q_library_processing(contract, {})
+            self.assertEqual(state['metadata_concurrency'], 6)
+            changed = w_library_processing(contract, {'action': 'set_concurrency', 'metadata_concurrency': 100})
+            self.assertEqual(changed['metadata_concurrency'], 100)
+            with self.assertRaises(ValueError):
+                w_library_processing(contract, {'action': 'set_concurrency', 'job_id': 'old', 'metadata_concurrency': 3})
+            self.assertEqual(q_library_processing(contract, {})['metadata_concurrency'], 100)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

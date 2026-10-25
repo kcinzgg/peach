@@ -138,12 +138,12 @@ def _record(root: Path, source: str) -> tuple[float, int, str]:
 
 def _state_for(root: Path, source: str, via: str) -> tuple[float, int]:
     """走 `via` 这条路时该认的冷却：记录是另一条路写下的就作废（删掉），按 `(0, 0)` 从第一档重新数。"""
-    until, blocks, recorded = _record(root, source)
-    if recorded != via and (until or blocks):
-        with _LOCK:
+    with _LOCK:
+        until, blocks, recorded = _record(root, source)
+        if recorded != via and (until or blocks):
             cooldown_path(root, source).unlink(missing_ok=True)
-        return 0.0, 0
-    return until, blocks
+            return 0.0, 0
+        return until, blocks
 
 
 def paused_until(root: Path, source: str) -> float:
@@ -175,9 +175,11 @@ def pause_source(root: Path, source: str, *, refused: bool = False,
 
 def _pause(cooldown: Path, until: float, blocks: int = 0, via: str = VIA_HTTP) -> None:
     with _LOCK:
+        previous, previous_blocks, previous_via = _record(cooldown.parent, cooldown.name.removeprefix('scraping-').removesuffix('.cooldown.json'))
+        if previous_via == via:
+            until, blocks = max(until, previous), max(blocks, previous_blocks)
         cooldown.parent.mkdir(parents=True, exist_ok=True)
-        cooldown.write_text(json.dumps({"until": max(until, time.time() + 1), "blocks": blocks, "via": via}),
-                            encoding="utf-8")
+        atomic_write_text(cooldown, json.dumps({"until": max(until, time.time() + 1), "blocks": blocks, "via": via}), mode=0o600)
 
 
 def source_for(url: str) -> str | None:
@@ -400,13 +402,14 @@ class SourceTransport:
     """公开采集按来源复用连接池；登录会话由特定来源消费者显式建立。"""
 
     def __init__(self, secrets_root: Path, *, max_requests: int = 0,
-                 max_bytes: int = 0, max_seconds: float = 0):
+                 max_bytes: int = 0, max_seconds: float = 0, gate=None):
         self.root = secrets_root
         self.transports: dict[str | None, HttpxTransport] = {}
         self.max_requests, self.max_bytes = max_requests, max_bytes
         from .processing_control import deadline_after
         self.deadline = deadline_after(max_seconds) if max_seconds else 0
         self.requests = self.bytes = 0
+        self.gate = gate
 
     def __call__(self, request: HttpRequest, timeout: float, max_bytes: int):
         for _ in range(6):
@@ -426,6 +429,11 @@ class SourceTransport:
         raise ValueError("采集重定向次数超过上限")
 
     def _request(self, request: HttpRequest, timeout: float, max_bytes: int):
+        from contextlib import nullcontext
+        with self.gate.slot(request.url) if self.gate is not None else nullcontext():
+            return self._request_ready(request, timeout, max_bytes)
+
+    def _request_ready(self, request: HttpRequest, timeout: float, max_bytes: int):
         """闸门到顶的三句话都写「本趟」和「再跑一次接着采」：这三条按任务重新计数，
         读的人要据以决定的是「现在重跑一遍」，不是去查哪里还有配额。"""
         source = source_for(request.url)
@@ -488,8 +496,11 @@ class SourceTransport:
                                    "请在采集设置里更新它的 Cookie；已有图片保留")
             raise SourcePaused("来源拒绝访问，暂停向它请求一段时间；已有图片保留")
         if blocks and response.status < 400:
-            # 这一趟通了，封已经解除：清掉记录，下次撞上从最短的一档重新起算。
-            cooldown.unlink(missing_ok=True)
+            # 并发请求新写入的冷却必须保留；只清掉已过期且仍属于这条传输路径的记录。
+            with _LOCK:
+                current_until, _, current_via = _record(self.root, key)
+                if current_until <= time.time() and current_via == via:
+                    cooldown.unlink(missing_ok=True)
         return response
 
     def hold(self, source: str, action: str) -> None:

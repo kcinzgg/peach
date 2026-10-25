@@ -19,7 +19,8 @@ class TempTree:
 
     def __init__(self, with_data_root: bool = True):
         self._temp = tempfile.TemporaryDirectory()
-        self.root = Path(self._temp.name).resolve()
+        self.root = Path(self._temp.name).resolve() / 'scope' / 'one' / 'two' / 'three'
+        self.root.mkdir(parents=True)
         self.project = self.root / "app"
         self.project.mkdir()
         self.data_root = self.root / "peach-data"
@@ -440,11 +441,16 @@ class ModuleConstantTests(unittest.TestCase):
 
     def test_location_declarations_stay_in_ledger_shape(self):
         # `asset.path` 与配置中的路径前缀均使用 Windows 格式，供目录访问权限检查匹配。
-        self.assertEqual(set(config.LOCATION_ROOT_DECLARATIONS), {"local", "115", "pikpak"})
-        self.assertEqual(
-            tuple(root for roots in config.LOCATION_ROOT_DECLARATIONS.values() for root in roots),
-            config.MEDIA_ROOT_DECLARATIONS,
-        )
+        try:
+            with TempTree() as tree, patch('peach.settings_file.active', return_value=tree.load()):
+                loaded = importlib.reload(config)
+                self.assertEqual(set(loaded.LOCATION_ROOT_DECLARATIONS), {"local", "115", "pikpak"})
+                self.assertEqual(
+                    tuple(root for roots in loaded.LOCATION_ROOT_DECLARATIONS.values() for root in roots),
+                    loaded.MEDIA_ROOT_DECLARATIONS,
+                )
+        finally:
+            importlib.reload(config)
 
     def test_settings_dataclass_reports_the_configured_state(self):
         from peach.config import PeachSettings

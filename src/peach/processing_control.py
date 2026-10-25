@@ -16,6 +16,8 @@ CURRENT = ContextVar('peach_library_processing_control', default=None)
 _CONTROLS = {}
 _LOCK = threading.Lock()
 MODES = ('low', 'standard', 'high')
+DEFAULT_METADATA_CONCURRENCY = 6
+MAX_METADATA_CONCURRENCY = 100
 MODE_FACTORS = {'low': 1.8, 'standard': 1.0, 'high': 0.75}
 IO_INTERVALS = {
     'low': {'scan': 0.008, 'probe': 0.75, 'network': 1.5, 'frame': 0.75, 'work': 0.15},
@@ -28,6 +30,19 @@ def valid_mode(value):
     if value not in MODES:
         raise ValueError('请选择低占用、标准或高强度模式')
     return value
+
+
+def valid_concurrency(value):
+    if type(value) is not int or not 1 <= value <= MAX_METADATA_CONCURRENCY:
+        raise ValueError('资料采集并发数须为 1–100 的整数')
+    return value
+
+
+def saved_concurrency(data):
+    try:
+        return valid_concurrency(data.get('metadata_concurrency', DEFAULT_METADATA_CONCURRENCY))
+    except ValueError:
+        return DEFAULT_METADATA_CONCURRENCY
 
 
 def _read(path):
@@ -145,6 +160,7 @@ class ProcessingControl:
         self.lock = threading.RLock()
         data = _read(path)
         self.mode = data.get('speed_mode') if data.get('speed_mode') in MODES else 'standard'
+        self.metadata_concurrency = saved_concurrency(data)
         self.job_id = data.get('job_id')
         self.paused = data.get('paused') is True
         self.event = threading.Event()
@@ -166,6 +182,7 @@ class ProcessingControl:
             if data.get('job_id') == self.job_id or self.publish is None:
                 self.job_id = data.get('job_id', self.job_id)
                 self.paused = data.get('paused', self.paused)
+                self.metadata_concurrency = saved_concurrency(data)
                 mode = data.get('speed_mode', self.mode)
                 if mode in MODES and self.mode != mode:
                     self.mode = mode
@@ -173,13 +190,16 @@ class ProcessingControl:
 
     def _save(self):
         atomic_write_text(self.path, json.dumps(dict(
-            speed_mode=self.mode, job_id=self.job_id, paused=self.paused)) + '\n')
+            speed_mode=self.mode, job_id=self.job_id, paused=self.paused,
+            metadata_concurrency=self.metadata_concurrency)) + '\n')
 
-    def request(self, action, job_id=None, mode=None):
+    def request(self, action, job_id=None, mode=None, concurrency=None):
         with self.lock:
             if job_id is not None and job_id != self.job_id:
                 raise ValueError('任务已变化，请刷新页面后重试')
-            if action == 'set_speed':
+            if action == 'set_concurrency':
+                self.metadata_concurrency = valid_concurrency(concurrency)
+            elif action == 'set_speed':
                 self.mode = valid_mode(mode)
                 self.next_work.clear()
             else:
@@ -196,6 +216,7 @@ class ProcessingControl:
     @contextmanager
     def bind(self, job_id, *, publish, active, db_path, mode=None):
         with self.lock:
+            self.refresh(force=True)
             self.select_job(job_id)
             if mode is not None:
                 self.mode = valid_mode(mode)
@@ -366,7 +387,7 @@ class ProcessingEstimate:
         phase = ('previews' if stage == '生成预览图' else
                  'images' if stage == '读取配套图片' else
                  'local' if stage in ('读取本地资料', '检查配套文件') else
-                 'metadata' if stage in ('采集缺失资料', '采集缺失封面', '保存待确认资料') else
+                 'metadata' if stage in ('采集缺失资料', '采集缺失封面', '保存待确认资料', '采集外部资料与封面') else
                  'probe' if stage == '读取时长与分辨率' else None)
         done, total = state.get('checked', 0), state.get('total', 0)
         now = time.monotonic() - self.paused_elapsed()

@@ -4,12 +4,72 @@ import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import type { Browser } from 'playwright-core';
 import { launch, layout, settle, visit, VIEWPORTS } from './harness.ts';
+import type { LibraryProcessingData } from '../src/react/library-processing/library-processing';
 
 describe('扫描与采集控制', () => {
   let browser: Browser;
   before(async () => { browser = await launch() });
   after(async () => { await browser?.close() });
   for (const viewport of VIEWPORTS) {
+    it(`${viewport.name}：并发数调整、百路明细与完成状态`, async () => {
+      const workers = (count: number) => Array.from({ length: count }, (_, index) => ({
+        asset_id: index + 1, name: `${'用于验证长文件名的影片'.repeat(6)}-${index}.mp4`, code: `DEMO-${index + 1}`,
+        action: index % 2 ? 'fetching_cover' : 'querying_metadata', network_status: index < 2 ? 'requesting_source' : 'waiting_source',
+        source: 'example.test', started_at: Date.now() / 1000,
+      }));
+      let state: LibraryProcessingData = { status: 'running', job_id: 'parallel-fixture', requested_stage: 'metadata',
+        metadata_only: true, speed_mode: 'high', metadata_concurrency: 6, checked: 120, total: 4000, covers: 60, auto_applied: 300,
+        parallel: { limit: 6, active: 6, pending: 3874, requesting: 2, waiting: 4, processing: 0,
+          finished: 120, succeeded: 110, failed: 10, items: workers(6), results: [{ asset_id: 200, name: 'done.mp4', code: 'DEMO-200', failed: true, covers: 1 }] } };
+      const writes: Record<string, unknown>[] = [];
+      const opened = await visit(browser, '/data-cleanup', viewport, async page => {
+        await page.route('**/api/library-processing', async route => {
+          if (route.request().method() === 'POST') {
+            const body = route.request().postDataJSON();
+            writes.push(body);
+            assert.equal(body.action, 'set_concurrency');
+            assert.equal(body.job_id, 'parallel-fixture');
+            state = { ...state, metadata_concurrency: body.metadata_concurrency, parallel: { ...state.parallel!,
+              limit: body.metadata_concurrency, active: 100, waiting: 98, pending: 3780, items: workers(100) } };
+          }
+          await route.fulfill({ json: state });
+        });
+      });
+      const { page } = opened;
+      const card = page.getByRole('region', { name: '扫描与采集', exact: true });
+      try {
+        const input = card.getByRole('spinbutton', { name: '资料采集并发数', exact: true });
+        await input.waitFor();
+        assert.equal(await input.inputValue(), '6');
+        const field = await input.boundingBox();
+        const apply = await card.getByRole('button', { name: '应用并发数', exact: true }).boundingBox();
+        assert.ok(field && apply && Math.abs(field.y + field.height / 2 - apply.y - apply.height / 2) <= 1,
+          JSON.stringify({ field, apply }));
+        await input.fill('101');
+        await card.getByText('请输入 1–100 的整数', { exact: true }).waitFor();
+        assert.equal(writes.length, 0);
+        await input.fill('100');
+        await card.getByRole('button', { name: '应用并发数', exact: true }).click();
+        await card.getByText('并发详情（100 项）', { exact: true }).click();
+        assert.equal(await card.locator('[data-worker-asset]').count(), 100);
+        assert.match(await card.innerText(), /请求中 2 · 等待来源 98/);
+        assert.match(await card.innerText(), /部分结果未取得 · 封面 \+1/);
+        await settle(page, 'section[aria-label="扫描与采集"] [data-processing-controls]');
+        const geometry = await layout(page);
+        assert.ok(geometry.scrollWidth <= geometry.viewportWidth, JSON.stringify(geometry));
+        assert.deepEqual(geometry.offenders, []);
+        const artifacts = path.resolve('..', 'build', 'agent-verification', 'processing-controls');
+        await mkdir(artifacts, { recursive: true });
+        await card.screenshot({ path: path.join(artifacts, `${viewport.name}-parallel.png`) });
+        await input.fill('1');
+        await card.getByRole('button', { name: '应用并发数', exact: true }).click();
+        await page.waitForFunction(() => document.querySelector('[data-processing-concurrency] input')?.getAttribute('value') === '1');
+        assert.equal(writes.at(-1)?.metadata_concurrency, 1);
+        state = { ...state, status: 'complete' };
+        await card.locator('[data-processing-workers]').waitFor({ state: 'hidden' });
+        assert.deepEqual(opened.problems, []);
+      } finally { await opened.close() }
+    });
     it(`${viewport.name}：资源提示、粗估、模式切换与暂停继续`, async () => {
       let state = { status: 'idle', job_id: '', checked: 0, total: 100, speed_mode: 'standard',
         steps: [{ id: 'sources', label: '扫描文件', status: 'complete' },
