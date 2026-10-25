@@ -178,7 +178,8 @@ def rebuild(tools_root: Path, *, runner: Runner = subprocess.run, timeout: int =
     bridge_home(tools_root).mkdir(parents=True, exist_ok=True)
     try:
         completed = runner(command, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=timeout, check=False, shell=False, env=env)
+                           errors="replace", timeout=timeout, check=False, shell=False, env=env,
+                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"重建 amane 桥超过 {timeout} 秒未完成"}
     except OSError as exc:
@@ -302,7 +303,8 @@ class AmaneBridge:
             completed = self.runner(
                 command, capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=min(timeout, self.timeout) if timeout else self.timeout,
-                check=False, shell=False, env=env)
+                check=False, shell=False, env=env,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         except subprocess.TimeoutExpired as exc:
             raise MetadataProviderError("amane 桥查询超时", kind="unavailable",
                                         retryable=True, temporary=True) from exc
