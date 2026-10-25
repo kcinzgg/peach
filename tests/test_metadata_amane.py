@@ -141,6 +141,8 @@ class RebuildTests(unittest.TestCase):
                 python = metadata_amane.bridge_python(tools)
 
                 def build(*args, **kwargs):
+                    self.assertEqual(kwargs["creationflags"],
+                                     subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
                     python.parent.mkdir(parents=True, exist_ok=True)
                     python.write_text("", encoding="utf-8")
                     return completed("")
@@ -241,7 +243,33 @@ class BridgeQueryTests(unittest.TestCase):
         self.assertEqual(command[command.index("--proxy") + 1], "http://p:1")
         self.assertEqual(kwargs["timeout"], 42)
         self.assertFalse(kwargs["shell"])
+        self.assertEqual(kwargs["creationflags"], subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         self.assertEqual(kwargs["env"]["PYTHONIOENCODING"], "utf-8")
+
+    @unittest.skipUnless(os.name == "nt", "Windows 控制台句柄")
+    def test_repeated_queries_have_no_console_and_preserve_unicode_output(self):
+        script = self.tools.resolve() / 'console_probe.py'
+        script.write_text(
+            'import ctypes, json, sys\n'
+            'ctypes.windll.kernel32.GetConsoleWindow.restype = ctypes.c_void_p\n'
+            'print("桥诊断", file=sys.stderr)\n'
+            'print(json.dumps({"sites": {}, "title": "资料标题", '
+            '"console": ctypes.windll.kernel32.GetConsoleWindow()}, ensure_ascii=False))\n',
+            encoding='utf-8')
+        captured = []
+
+        def runner(*args, **kwargs):
+            result = subprocess.run(*args, **kwargs)
+            captured.append(result)
+            return result
+
+        bridge = metadata_amane.AmaneBridge(Path(sys.executable), script, runner=runner)
+        for _ in range(3):
+            result = bridge.query('SSIS-877', ['makers'], proxy_options={'trust_env': False})
+            self.assertIsNone(result['console'])
+            self.assertEqual(result['title'], '资料标题')
+        self.assertEqual([row.returncode for row in captured], [0, 0, 0])
+        self.assertTrue(all('桥诊断' in row.stderr for row in captured))
 
     def test_query_rejects_sites_peach_did_not_open(self):
         bridge = metadata_amane.AmaneBridge.create(self.tools, runner=lambda *a, **k: completed(""))
