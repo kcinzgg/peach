@@ -761,19 +761,38 @@ def _site_candidates(transport: HttpTransport, code: str, evidence: MetadataEvid
         candidates += mgstage_images(transport, code, deadline=deadline)
     if candidates or ((prestige or amateur) and evidence.candidates):
         return candidates
+    from peach.metadata_network import source_results
+    directories = []
     if ('dmm' not in evidence.sources
             and not prestige and not amateur and not is_uncensored_code(code)):
-        try:
-            live_evidence = dmm_evidence(transport, code, deadline=deadline)
-            candidates += list(live_evidence.candidates)
-        except (Unavailable, SourcePaused):
-            record('source_unanswered')
+        directories.append('dmm')
     # 有成功快照时不重复打 r18；失败快照不算证据，仍允许联网刷新。
-    if ('r18dev' not in evidence.sources and not live_evidence.candidates
+    if ('r18dev' not in evidence.sources
             and not ('dmm' in evidence.sources and evidence.candidates)):
-        live_evidence = r18_evidence(transport, code, deadline=deadline, record=record)
-        candidates += list(live_evidence.candidates)
-        _sleep_within(delay, deadline)
+        directories.append('r18dev')
+
+    def ask_directory(source):
+        if source == 'dmm':
+            return dmm_evidence(transport, code, deadline=deadline)
+        return r18_evidence(transport, code, deadline=deadline, record=record)
+
+    directory_error = None
+    with source_results(directories, ask_directory) as available:
+        for source, outcome in available:
+            try:
+                live_evidence = outcome.get()
+            except (Unavailable, SourcePaused) as error:
+                if source != 'dmm':
+                    directory_error = error
+                record('source_unanswered')
+                continue
+            candidates += list(live_evidence.candidates)
+            if source == 'r18dev':
+                _sleep_within(delay, deadline)
+            if live_evidence.candidates:
+                break
+    if not candidates and directory_error is not None:
+        raise directory_error
     # 目录新识别出 Prestige 时补问集团自营渠道。
     if not prestige and _is_prestige(live_evidence):
         candidates += prestige_group_images(transport, code, deadline=deadline)
@@ -855,39 +874,43 @@ def _measure(transport: HttpTransport, candidates, record, *, minimum_width: int
     """
     measured: list[tuple[int, Candidate, tuple[int, int]]] = []
     unreachable = answered = 0
+    from peach.metadata_network import source_results
     try:
-        for candidate in candidates:
-            try:
-                width, height = probe_size(transport, candidate, deadline=deadline)
-            except httpx.TransportError as error:
-                record(_probe_failure(error))
-                record("unanswered")
-                unreachable += 1
-                continue
-            except Unavailable as error:
-                record(_probe_failure(error))
-                if not isinstance(error, NotFound):
+        with source_results(candidates, lambda candidate: probe_size(transport, candidate, deadline=deadline)) as available:
+            for candidate, outcome in available:
+                try:
+                    width, height = outcome.get()
+                except httpx.TransportError as error:
+                    record(_probe_failure(error))
                     record("unanswered")
+                    unreachable += 1
+                    continue
+                except Unavailable as error:
+                    record(_probe_failure(error))
+                    if not isinstance(error, NotFound):
+                        record("unanswered")
+                    answered += 1
+                    continue
+                except (UnidentifiedImageError, OSError):
+                    record("invalid_image")
+                    answered += 1
+                    continue
+                finally:
+                    _sleep_within(delay, deadline)
                 answered += 1
-                continue
-            except (UnidentifiedImageError, OSError):
-                record("invalid_image")
-                answered += 1
-                continue
-            finally:
-                _sleep_within(delay, deadline)
-            answered += 1
-            if width >= minimum_width:
-                measured.append((width * height, candidate, (width, height)))
-            else:
-                record("too_small")
+                if width >= minimum_width:
+                    measured.append((width * height, candidate, (width, height)))
+                else:
+                    record("too_small")
     except DeadlineExceeded:
         if unreachable and not answered:
             raise CoverConnectError(HOSTS_UNREACHABLE) from None
         raise
     if unreachable and not answered:
         raise CoverConnectError(HOSTS_UNREACHABLE)
-    return measured
+    # 同尺寸候选的顺序由来源证据决定，不由请求完成的先后决定。
+    positions = {id(candidate): index for index, candidate in enumerate(candidates)}
+    return sorted(measured, key=lambda item: positions[id(item[1])])
 
 
 def _download_best(transport: HttpTransport, measured, record, *, minimum_width: int,

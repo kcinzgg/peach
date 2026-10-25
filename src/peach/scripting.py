@@ -183,3 +183,31 @@ class HostLimiter:
                 self._sleeper(delay)
                 now = self._clock()
             self._next[key] = now + self._intervals[key]
+
+    def ready_in(self, url: str) -> float:
+        """只读下一次可发的间隔；持锁的等待者也视为尚未就绪。"""
+        key = self._key(url)
+        if key is None:
+            return 0.0
+        if not self._locks[key].acquire(blocking=False):
+            return .05
+        try:
+            return max(0.0, self._next[key] - self._clock())
+        finally:
+            self._locks[key].release()
+
+    def try_wait(self, url: str) -> bool:
+        """原子取得一个已到期的节拍；未到期时不占线程等待。"""
+        key = self._key(url)
+        if key is None:
+            return True
+        if not self._locks[key].acquire(blocking=False):
+            return False
+        try:
+            now = self._clock()
+            if self._next[key] > now:
+                return False
+            self._next[key] = now + self._intervals[key]
+            return True
+        finally:
+            self._locks[key].release()

@@ -347,11 +347,13 @@ class LibraryMetadataProvider:
         from contextlib import ExitStack, nullcontext
         from .processing_control import CURRENT, checkpoint
         from .scraping_access import SourcePaused, paused_until
+        from .metadata_network import defer_until
         control = CURRENT.get()
         report = getattr(control, 'network', lambda **values: None)
         report(network_status='waiting_source', source='amane')
         with getattr(control, 'source_wait', nullcontext)():
             while not self.bridge_lock.acquire(blocking=False):
+                defer_until('amane', lambda: not self.bridge_lock.locked())
                 checkpoint()
                 time.sleep(.05)
         try:
@@ -505,6 +507,7 @@ class LibraryMetadataProvider:
         就不问哪一处，不给就按 `metadata_routes.FC2_STAGE` 的顺序都问。
         """
         from .sources import SITE_SOURCES, Session
+        from .metadata_network import SourceDeferred
         from .sources.fc2 import UNRECOGNISED, video_id
         if not video_id(code):
             raise NotFound(UNRECOGNISED)
@@ -526,6 +529,9 @@ class LibraryMetadataProvider:
                 additions = [(name, record.payload())
                              for record in SITE_SOURCES[name]().records(code, session=session)]
                 state['found'] += additions
+            except SourceDeferred:
+                state['asked'].discard(name)
+                raise
             except DeadlineExceeded:
                 # 前面已经答上时预算用尽只是「没再往下问」，不是这个番号没取到。
                 if not state['found']:
@@ -1497,48 +1503,51 @@ class _RemoteSession:
         problems, held, entries = [], [], results.entries
         attempted = set(answered)
         stages = metadata_routes.stages_for_chain(chain)
-        for source, then in zip(stages, (*stages[1:], '')):
-            members = self._askable(metadata_routes.stage_members(source, chain), code, answered)
-            if not members:
-                continue
-            attempted.update(members)
+        from .metadata_network import source_results
+        scheduled = [(source, then, self._askable(metadata_routes.stage_members(source, chain), code, answered))
+                     for source, then in zip(stages, (*stages[1:], ''))]
+
+        def ask_stage(stage):
+            source, then, members = stage
             cached = self._cached_evidence(members, code)
             if cached:
                 results.cached(cached)
                 if metadata_routes.settles(required, _given_fields(entries),
                                            wants_tags=wants_tags, then=then):
-                    break
+                    return []
                 # FC2 那一档缓存里只有官方那页时，缺的演员还得去镜像站问（见 `fc2()`）。
                 if source != 'fc2':
+                    return []
+            return self._ask(source, code, members, cached, required=required, evidence=evidence,
+                             deadline=_extended(deadline, _excused(self._provider) - mark),
+                             received=results.save)
+
+        with source_results([stage for stage in scheduled if stage[2]], ask_stage) as available:
+            for (source, then, members), outcome in available:
+                attempted.update(members)
+                try:
+                    found = outcome.get()
+                except DeadlineExceeded:
+                    self.reset()
+                    if entries:
+                        break
+                    issue(row, '外部资料在预算时间内未取得，可稍后重试', action=action, retryable=True)
+                    return []
+                except Exception as error:
+                    if is_missing(error):
+                        for name in getattr(error, 'sites', None) or members:
+                            self._record_miss(name, code)
+                        continue
+                    problems.append(describe_failure(error)
+                                    if source in ('community', 'amane', 'amane_official')
+                                    else f'{SOURCE_LABELS.get(source, source)}：{describe_failure(error)}')
+                    held.append(source_paused(error))
                     continue
-            try:
-                # 浏览器来源等人点验证的那段不算进这部片的预算（`LibraryMetadataProvider.excused`）。
-                found = self._ask(source, code, members, cached, required=required, evidence=evidence,
-                                  deadline=_extended(deadline, _excused(self._provider) - mark),
-                                  received=results.save)
-            except DeadlineExceeded:
-                self.reset()
-                if entries:
+                update(stage='保存待确认资料')
+                results.save(found)
+                if metadata_routes.settles(required, _given_fields(entries),
+                                           wants_tags=wants_tags, then=then):
                     break
-                issue(row, '外部资料在预算时间内未取得，可稍后重试', action=action, retryable=True)
-                return []
-            except Exception as error:
-                if is_missing(error):
-                    for name in getattr(error, 'sites', None) or members:
-                        self._record_miss(name, code)
-                    continue
-                # 社区那一档的原因里已经写明是哪一家了（`community()` 逐家拼过），再套一层
-                # 就成了「社区来源：javdb：…」。单家来源的原因不带来源名，这里补上。
-                problems.append(describe_failure(error)
-                                if source in ('community', 'amane', 'amane_official')
-                                else f'{SOURCE_LABELS.get(source, source)}：{describe_failure(error)}')
-                held.append(source_paused(error))
-                continue
-            update(stage='保存待确认资料')
-            results.save(found)
-            if metadata_routes.settles(required, _given_fields(entries),
-                                       wants_tags=wants_tags, then=then):
-                break
         tag_entries = self._preferred_tags(row, code, missing, chain, entries, attempted,
             update=update, issue=issue, deadline=_extended(deadline, _excused(self._provider) - mark))
         results.cached(tag_entries)
