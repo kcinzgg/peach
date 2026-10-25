@@ -382,10 +382,11 @@ class RelatedEndpointCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.json(), second.json())
         self.assertEqual(spy.call_count, 1)
 
-        self.app.state.web_contract.cache_bust()
+        with self.app.state.web_contract.write_transaction() as connection:
+            connection.execute("UPDATE asset SET feedback='like' WHERE id=1")
         with patch("peach.web_router.q_related", side_effect=q_related) as spy:
             await self.client.get("/api/related?id=1")
-        self.assertEqual(spy.call_count, 1, "cache_bust 之后必须重算")
+        self.assertEqual(spy.call_count, 1, "相关资料变化之后必须重算")
 
     async def test_a_different_limit_is_a_different_result(self):
         """限流后的 limit 进了缓存键；不进的话第二次请求会拿到条数不对的列表。"""
@@ -438,21 +439,21 @@ class CoverIndexTests(unittest.TestCase):
         (self.covers / "ABC-004.jpg").write_bytes(b"jpg")
         self.assertTrue(self.contract.has_cover("ABC-004"))
         scans = []
-        original = self.contract._scan_cover_root
+        original = self.contract._covers.reader
 
-        def counted():
-            scans.append(1)
-            return original()
+        def counted(path):
+            scans.append(path.name)
+            return original(path)
 
-        with patch.object(self.contract, "_scan_cover_root", side_effect=counted):
-            # 目录没变就不重扫，这正是索引省下 stat 的来源。
+        with patch.object(self.contract._covers, "reader", side_effect=counted):
+            # 已登记的封面复用持久结果。
             self.assertTrue(self.contract.has_cover("ABC-004"))
             self.assertEqual(scans, [])
-            # 新文件改了目录的修改时间，索引按目录版本当场重扫。
+            # 新文件只解析自己的附属信息。
             (self.covers / "GHI-005.jpg").write_bytes(b"jpg")
             os.utime(self.covers, ns=(0, self.covers.stat().st_mtime_ns + 1_000_000))
             self.assertTrue(self.contract.has_cover("GHI-005"))
-            self.assertEqual(scans, [1])
+            self.assertEqual(scans, ['GHI-005.jpg'])
 
 
 if __name__ == "__main__":
