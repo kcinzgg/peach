@@ -403,6 +403,8 @@ minnano-av 也在 Cloudflare 后面，但对 HTTP 客户端是间歇拦截：202
 
 ### 库内采集的节奏
 
+- 库内资料与封面采集不按整趟请求数、累计下载量或运行时长截断。每个网站共享访问间隔和冷却记录；
+  单项资料查询最多 90 秒、封面采集最多 240 秒，每次响应保留大小限制及有界重试。暂停与恢复沿用已保存结果。
 - javdb 的主机间隔由用户定：`library_processing.SOURCE_INTERVALS` 里 `javdb.com` 与 `jdbstatic.com` 都是 3 秒，
   两个主机要一起改。
 - **FC2 的商品号在三家里只问 javdb**（`community_catalog.community_sources_for`）。本机来源证据里 AVBase 与 JavBus

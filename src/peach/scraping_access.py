@@ -407,7 +407,6 @@ class SourceTransport:
         from .processing_control import deadline_after
         self.deadline = deadline_after(max_seconds) if max_seconds else 0
         self.requests = self.bytes = 0
-        self.budget = None
 
     def __call__(self, request: HttpRequest, timeout: float, max_bytes: int):
         for _ in range(6):
@@ -427,13 +426,6 @@ class SourceTransport:
         raise ValueError("采集重定向次数超过上限")
 
     def _request(self, request: HttpRequest, timeout: float, max_bytes: int):
-        if self.budget is not None:
-            before = self.bytes
-            return self.budget.run(self._request_budgeted, request, timeout, max_bytes,
-                                   measured=lambda: self.bytes - before)
-        return self._request_budgeted(request, timeout, max_bytes)
-
-    def _request_budgeted(self, request: HttpRequest, timeout: float, max_bytes: int):
         """闸门到顶的三句话都写「本趟」和「再跑一次接着采」：这三条按任务重新计数，
         读的人要据以决定的是「现在重跑一遍」，不是去查哪里还有配额。"""
         source = source_for(request.url)

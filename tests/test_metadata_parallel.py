@@ -1,4 +1,4 @@
-"""资料并发、单写入线程、停止与共享网络预算的隔离验证。"""
+"""资料并发、单写入线程、停止与来源节奏的隔离验证。"""
 from pathlib import Path
 import tempfile
 import threading
@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from peach.metadata_parallel import collect_parallel, RequestBudget, workers_for
+from peach.metadata_parallel import collect_parallel, workers_for
 from peach.processing_control import CURRENT
 from peach.library_processing import process_library
 from peach.review_csv import read_rows
@@ -107,61 +107,18 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual([workers_for(mode) for mode in ('low', 'standard', 'high')], [1, 2, 4])
 
 
-class BudgetTests(unittest.TestCase):
-    def test_time_budget_starts_at_first_request(self):
-        with patch('peach.metadata_parallel.deadline_after', return_value=120) as deadline, \
-                patch('peach.metadata_parallel.time.monotonic', return_value=100):
-            budget = RequestBudget(2, 100, 20)
-            deadline.assert_not_called()
-            inner = Mock(return_value=SimpleNamespace(body=b'123'))
-            budget.run(inner, 'a', 30, 10)
-            budget.run(inner, 'b', 30, 10)
-        deadline.assert_called_once_with(20)
-        self.assertEqual(inner.call_args.args[1], 20)
-
-    def test_independent_transports_charge_one_budget(self):
-        from peach.http import HttpRequest
-        from peach.scraping_access import SourceTransport
+class SourcePacingTests(unittest.TestCase):
+    def test_workers_share_host_limiter_and_bridge_lock(self):
+        from peach.library_processing import _RemoteSession
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-            budget = RequestBudget(2, 100, 20)
-            response = SimpleNamespace(status=200, headers={}, body=b'123')
-            sent = Mock(return_value=response)
-            first, second = SourceTransport(root), SourceTransport(root)
-            first.budget = second.budget = budget
-            with patch.object(first, '_transport_for', return_value=sent), \
-                    patch.object(second, '_transport_for', return_value=sent):
-                first(HttpRequest('GET', 'https://example.test/a', {}), 5, 10)
-                second(HttpRequest('GET', 'https://example.test/b', {}), 5, 10)
-                with self.assertRaises(SourcePaused):
-                    second(HttpRequest('GET', 'https://example.test/c', {}), 5, 10)
-            self.assertEqual(sent.call_count, 2)
-            self.assertEqual(budget.bytes, 6)
-
-    def test_workers_share_request_count(self):
-        budget = RequestBudget(2, 100, 20)
-        inner = Mock(return_value=SimpleNamespace(body=b'123'))
-        budget.run(inner, 'a', 10, 50)
-        budget.run(inner, 'b', 10, 50)
-        with self.assertRaises(SourcePaused):
-            budget.run(inner, 'c', 10, 50)
-        self.assertEqual(inner.call_count, 2)
-        self.assertEqual((budget.requests, budget.bytes, budget.reserved), (2, 6, 0))
-
-    def test_inflight_bytes_are_reserved_and_unused_bytes_returned(self):
-        budget = RequestBudget(5, 10, 20)
-
-        def inner(request, timeout, limit):
-            self.assertEqual(limit, 10)
-            with self.assertRaises(SourcePaused):
-                budget.run(Mock(), 'second', 10, 10)
-            return SimpleNamespace(body=b'123')
-
-        budget.run(inner, 'first', 10, 10)
-        accepted = Mock(return_value=SimpleNamespace(body=b'4567890'))
-        budget.run(accepted, 'second', 10, 10)
-        self.assertEqual(accepted.call_args.args[-1], 7)
-        self.assertEqual(budget.bytes, 10)
+            config = PeachConfig(root, root / 'config.toml')
+            parent = _RemoteSession(config, None, {}, retrying=False)
+            child = parent.fork()
+            first, second = parent.provider(), child.provider()
+            self.assertIs(first.transport.limiter, second.transport.limiter)
+            self.assertIs(first.bridge_lock, second.bridge_lock)
+            self.assertIsNot(first.transport.inner, second.transport.inner)
 
 
 class LibraryParallelTests(unittest.TestCase):

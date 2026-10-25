@@ -2,9 +2,8 @@
 from concurrent.futures import Future, ThreadPoolExecutor
 from queue import Empty, Queue
 import threading
-import time
 
-from .processing_control import CURRENT, deadline_after
+from .processing_control import CURRENT
 
 
 def workers_for(mode):
@@ -84,36 +83,5 @@ def collect_parallel(items, *, key, work, complete, capacity, checkpoint):
     finally:
         stopped.set()
         executor.shutdown(wait=True, cancel_futures=True)
-
-
-class RequestBudget:
-    """整个资料任务共用请求数、下载量和时间预算；在途响应预留额度。"""
-    def __init__(self, requests, size, seconds):
-        self.max_requests, self.max_bytes = requests, size
-        self.seconds, self.deadline = seconds, None
-        self.requests = self.bytes = self.reserved = 0
-        self.lock = threading.Lock()
-
-    def run(self, inner, request, timeout, limit, *, measured=None):
-        from .scraping_access import SourcePaused
-        with self.lock:
-            if self.deadline is None:
-                self.deadline = deadline_after(self.seconds)
-            remaining = self.max_bytes - self.bytes - self.reserved
-            timeout = min(timeout, self.deadline - time.monotonic())
-            if self.requests >= self.max_requests or remaining <= 0 or timeout <= 0:
-                raise SourcePaused('本趟采集预算已用完，已有结果保留，可稍后续跑')
-            limit = min(limit, remaining)
-            self.requests += 1
-            self.reserved += limit
-        consumed = limit
-        try:
-            response = inner(request, timeout, limit)
-            consumed = len(response.body)
-            return response
-        finally:
-            with self.lock:
-                self.reserved -= limit
-                self.bytes += measured() if measured is not None else consumed
 
 
