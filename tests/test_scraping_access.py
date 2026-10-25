@@ -213,7 +213,8 @@ class ScrapingAccessTests(unittest.TestCase):
         from peach.library_processing import LibraryMetadataProvider
         with patch('peach.scraping_access.time.monotonic', return_value=100):
             provider = LibraryMetadataProvider(self.root)
-        transport = provider.transport.inner
+        transport = provider.transport
+        transport.gate = None
         transport.requests, transport.bytes = 6000, 1024 ** 3
         response = HttpResponse(200, {}, '资料'.encode())
         sent = Mock(return_value=response)

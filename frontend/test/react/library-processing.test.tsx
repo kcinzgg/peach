@@ -65,6 +65,14 @@ async function open(first: LibraryProcessingData, reply: Reply = () => first) {
 const card = (props: LibraryProcessingProps) => (
   <QueryClientProvider client={queryClient}><LibraryProcessingCard {...props} /></QueryClientProvider>
 );
+
+it('并发摘要使用汇总快照而不是单项名称', () => {
+  const state: LibraryProcessingData = { status: 'running', checked: 10, total: 100, metadata_concurrency: 6,
+    current_asset_name: '陈旧单项.mp4', parallel: { limit: 6, active: 6, pending: 84, waiting: 4,
+      requesting: 2, processing: 0, finished: 10, succeeded: 9, failed: 1, items: [], results: [] } };
+  expect(processingLine(state)).toBe('采集并发 6 / 6 · 请求中 2 · 等待来源 4 · 10 / 100 项');
+  expect(currentLine({ ...state, status: 'paused' })).toBe('已暂停');
+});
 const notice = (props: LibraryProcessingProps) => (
   <QueryClientProvider client={queryClient}><LibraryProcessingNotice {...props} /></QueryClientProvider>
 );

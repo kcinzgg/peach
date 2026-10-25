@@ -28,6 +28,13 @@ export interface LibraryProcessingData {
   /** `idle` | `running` | `pausing` | `paused` | `complete` | `failed`。 */
   status: string;
   speed_mode?: ProcessingSpeed;
+  metadata_concurrency?: number;
+  parallel?: {
+    limit: number; active: number; pending: number; waiting: number; requesting: number; processing: number;
+    finished: number; succeeded: number; failed: number;
+    items: { asset_id: number; name: string; code: string; action: string; network_status: string; source: string; started_at: number }[];
+    results: { asset_id: number; name: string; code: string; failed: boolean; covers: number }[];
+  };
   eta_seconds_min?: number | null;
   eta_seconds_max?: number | null;
   eta_kind?: 'historical' | 'measured' | 'estimating';
@@ -73,6 +80,7 @@ export interface LibraryProcessingData {
 /** 一次写操作的请求体：指定处理阶段与影片，或者按任务号重试失败项。 */
 export type ProcessingSpeed = 'low' | 'standard' | 'high';
 export interface LibraryProcessingCommand {
+  metadata_concurrency?: number;
   stage?: 'scan' | 'collect' | 'previews' | 'metadata';
   asset_ids?: number[];
   job_id?: string;
@@ -81,7 +89,8 @@ export interface LibraryProcessingCommand {
 }
 export type ProcessingControlCommand =
   | { action: 'pause' | 'resume'; job_id: string }
-  | { action: 'set_speed'; speed_mode: ProcessingSpeed; job_id?: string };
+  | { action: 'set_speed'; speed_mode: ProcessingSpeed; job_id?: string }
+  | { action: 'set_concurrency'; metadata_concurrency: number; job_id?: string };
 
 /** 暂停中的任务仍占用同一份处理范围，可继续并持续读取状态。 */
 export const processingActive = (state?: LibraryProcessingData) =>
@@ -161,6 +170,10 @@ export function notesLine(notes: Record<string, number>): string {
 export function currentLine(state: LibraryProcessingData): string {
   if (state.status === 'paused') return '已暂停';
   if (state.status === 'pausing') return '正在暂停';
+  if (state.parallel && state.parallel.active > 0) {
+    const parallel = state.parallel;
+    return `采集并发 ${parallel.active} / ${state.metadata_concurrency ?? parallel.limit} · 请求中 ${parallel.requesting} · 等待来源 ${parallel.waiting}`;
+  }
   const action = ACTION_LABELS[state.current_action || ''] || state.stage || '正在处理';
   const waited = state.waited_seconds ? ` · 已等待 ${elapsedText(state.waited_seconds)}` : '';
   return state.current_asset_name

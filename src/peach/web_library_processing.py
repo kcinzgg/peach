@@ -5,7 +5,7 @@ from . import settings_file
 from .library_processing import (ALL_STAGES, COLLECT_STAGE, SCAN_STAGE, STAGES,
                                 METADATA_STAGE, PREVIEWS_STAGE, _asset_selection,
                                 decorate, issues_path, process_library, snapshot)
-from .processing_control import control_for, initial_estimate, valid_mode, mode_ratio
+from .processing_control import control_for, initial_estimate, valid_mode, mode_ratio, valid_concurrency
 
 ACTIVE = ('running', 'pausing', 'paused')
 
@@ -20,6 +20,7 @@ def q_library_processing(contract, _args):
     control = control_for(settings_file.active())
     control.refresh(force=True)
     state['speed_mode'] = control.mode
+    state['metadata_concurrency'] = control.metadata_concurrency
     from .media_processing_policy import metadata_only
     state['metadata_only'] = metadata_only(settings_file.active().directory('state'))
     from .job_recovery import read
@@ -37,20 +38,27 @@ def q_library_processing(contract, _args):
 
 def _control_action(contract, config, body):
     action = body['action']
-    if action not in ('pause', 'resume', 'set_speed'):
+    if action not in ('pause', 'resume', 'set_speed', 'set_concurrency'):
         raise ValueError('处理动作无效')
     previous = _current(contract)
     job_id = body.get('job_id')
-    if action != 'set_speed' and not job_id:
+    preference = action in ('set_speed', 'set_concurrency')
+    if not preference and not job_id:
         raise ValueError('请选择正在处理的任务')
     if job_id and str(job_id) != str(previous.get('job_id') or ''):
         raise ValueError('任务已变化，请刷新页面后重试')
-    if action != 'set_speed' and previous.get('status') not in ACTIVE:
+    if not preference and previous.get('status') not in ACTIVE:
         raise ValueError('当前没有可暂停或继续的任务')
     control = control_for(config)
     control.refresh(force=True)
     if job_id:
         control.select_job(str(job_id))
+    if action == 'set_concurrency':
+        concurrency = valid_concurrency(body.get('metadata_concurrency'))
+        control.request(action, concurrency=concurrency)
+        if previous.get('status') in ACTIVE:
+            contract.library_processing_job.update(previous['job_id'], metadata_concurrency=concurrency, eta_initial=True)
+        return q_library_processing(contract, {})
     if action == 'set_speed':
         mode = valid_mode(body.get('speed_mode'))
         control.request(action, mode=mode)
@@ -181,7 +189,10 @@ def w_library_processing(contract, body, *, resume=False):
         return previous
     mode = valid_mode(control_for(config).mode if resume else
                       (body or {}).get('speed_mode') or control_for(config).mode)
+    concurrency = valid_concurrency(body['metadata_concurrency']) if not resume and 'metadata_concurrency' in (body or {}) else None
     control_for(config).request('set_speed', mode=mode)
+    if concurrency is not None:
+        control_for(config).request('set_concurrency', concurrency=concurrency)
     def work(job_id):
         try:
             result = process_library(config, contract.db_path, contract.candidate_root, contract.cover_root,
