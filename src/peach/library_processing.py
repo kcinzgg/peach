@@ -247,7 +247,7 @@ class CoverKept(NotFound):
 
 
 def cover_settled(path):
-    """网络封面按 1600px 判断高清；用户提供的本地图片和 FC2 商品图保留尺寸门槛。"""
+    """首张合格官网封面按采集门槛完成；高清比较产物按 1600px 判断。"""
     size = measure_image_file(path)
     if size is None:
         return False
@@ -258,6 +258,8 @@ def cover_settled(path):
     from .community_catalog import origin_of
     if origin_of(str(evidence.get('source_url') or '')) in ('javdb', 'javbus'):
         return False
+    if evidence.get('selection_policy') == 'first-qualified-official':
+        return size[0] >= MIN_WIDTH
     if not evidence.get('source_url') or str(Path(path).stem).upper().startswith('FC2'):
         return max(size) >= MIN_WIDTH
     return max(size) >= 1600
@@ -629,6 +631,20 @@ class LibraryMetadataProvider:
         GraphQL（`sources/dmm.py`，ADR-0059）。"""
         return self.site(source, code, deadline=deadline)
 
+    def _qualified_official_cover(self, code, snapshots, deadline):
+        """核验快照的番号与官方来源，取得合格图片或交回完整发现流程。"""
+        from .metadata import identifies_code
+        from .jav_cover_fetch import first_qualified_cover, Unavailable
+        from .scraping_access import SourcePaused
+        verified = _official_evidence([(name, payload) for name, payload in snapshots
+                                       if identifies_code(code, payload)])
+        if verified and verified.candidates:
+            try:
+                return first_qualified_cover(self.transport, code, verified, deadline=deadline)
+            except (Unavailable, SourcePaused):
+                pass
+        return None
+
     def cover(self, code, cover_root, *, deadline=None, evidence=(), snapshots=(), absent=()):
         """官方大图优先；没有就用社区来源里两个图源对得上的那张；再没有就用官方小图。
 
@@ -640,8 +656,8 @@ class LibraryMetadataProvider:
         两处都是发行方，没有第二个图源可印证也不该被扣住。`evidence` 见 `_sources_for`。
 
         `snapshots` 是资料那一步这一趟已经取到、或磁盘缓存里还新鲜的快照 `[(来源, 资料)]`，
-        `absent` 是一周内说过没有、或不在这个番号链上的站：两者都不再问。r18.dev 与 DMM 的快照
-        给出官方候选（`_official_evidence`），并与 `best_cover` 在线官方候选一起比较尺寸；
+        `absent` 是一周内说过没有、或不在这个番号链上的站：两者都不再问。缺封面时，番号已核验的
+        官方快照先取首张宽度合格的静态图；未取得时由 `best_cover` 补查与比较官方候选。
         社区那几家的快照直接交给图源印证，JavDB 图片仅用作比对证据。
         几处没问成且全是冷却时报 `SourcePaused`（本趟没轮到），否则报 `Unavailable`。
         """
@@ -654,11 +670,17 @@ class LibraryMetadataProvider:
         kept = measure_image_file(target)
         mark = self.excused
         official, verified_by, problems, siblings = None, (), [], ()
+        selection_policy = 'compared'
+        if kept is None:
+            official = self._qualified_official_cover(code, snapshots, deadline)
+            if official is not None:
+                selection_policy = 'first-qualified-official'
         try:
-            siblings = self._official_candidates(code, evidence, deadline=deadline, known=snapshots, absent=absent)
-            official = best_cover(self.transport, code, 0, deadline=_extended(deadline, self.excused - mark),
-                                  prior_candidates=siblings, minimum_width=SMALL_MIN_WIDTH,
-                                  known=_official_evidence(snapshots, absent))
+            if official is None:
+                siblings = self._official_candidates(code, evidence, deadline=deadline, known=snapshots, absent=absent)
+                official = best_cover(self.transport, code, 0, deadline=_extended(deadline, self.excused - mark),
+                                      prior_candidates=siblings, minimum_width=SMALL_MIN_WIDTH,
+                                      known=_official_evidence(snapshots, absent))
         except NotFound:
             pass
         except (Unavailable, SourcePaused) as error:
@@ -703,6 +725,7 @@ class LibraryMetadataProvider:
         title = artwork_title(snapshots)
         install_cover(target, code, data, size, evidence=dict(source=candidate.source, title=title,
             source_url=candidate.url, width=size[0], height=size[1], verified_by=list(verified_by),
+            selection_policy=selection_policy,
             raw_sha256=hashlib.sha256(data).hexdigest(), checked_at=time.time()))
         return True
 

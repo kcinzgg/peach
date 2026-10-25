@@ -800,6 +800,42 @@ def _site_candidates(transport: HttpTransport, code: str, evidence: MetadataEvid
     return candidates
 
 
+def first_qualified_cover(transport: HttpTransport, code: str, evidence: MetadataEvidence, *,
+                          deadline: float | None = None):
+    """从番号已核验的官方证据取得首张合格封面，忙碌来源让位给可用来源。
+
+    仅消费调用方提供的官方候选；不查询目录，也不要求比较全部高清版本。
+    图片仍须经过缩略图、跨作品、尺寸、完整解码和静态图片检查。
+    """
+    if is_korean_mib_code(code):
+        raise Unavailable(MIB_NOT_JAV)
+    from peach.metadata_network import source_results
+    candidates = _usable_candidates(code, evidence.candidates, {}, _CANDIDATE_QUALITY[PRODUCT_IMAGE], 0)
+
+    def download(candidate):
+        size = probe_size(transport, candidate, deadline=deadline)
+        if size[0] < MIN_WIDTH:
+            raise NotFound('官方封面未达到尺寸门槛')
+        return _download_best(transport, [(size[0] * size[1], candidate, size)], lambda key: None,
+                              minimum_width=MIN_WIDTH, minimum_quality=_CANDIDATE_QUALITY[PRODUCT_IMAGE],
+                              minimum_pixels=0, deadline=deadline)
+
+    problems = []
+    with source_results(candidates, download) as available:
+        for _, outcome in available:
+            try:
+                return outcome.get()
+            except NotFound:
+                continue
+            except (Unavailable, SourcePaused, httpx.TransportError) as error:
+                problems.append(error)
+            except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
+                continue
+    if problems:
+        raise Unavailable('官方候选尚未取得完整图片') from problems[-1]
+    raise NotFound('已核验的官方候选没有合格封面')
+
+
 def best_cover(transport: HttpTransport, code: str, delay: float, *,
                metadata_root: Path | None = None,
                prior_candidates: tuple[Candidate, ...] = (),
