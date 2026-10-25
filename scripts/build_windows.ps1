@@ -128,7 +128,10 @@ if ($Standalone) {
         throw "cloudflared SHA-256 mismatch: expected $($CloudflaredManifest.sha256), got $CloudflaredHash"
     }
 }
-& $Python -m PyInstaller --noconfirm --clean @BuildMode --windowed --name Peach `
+$AmaneDataJson = & $Python -X utf8 (Join-Path $PSScriptRoot 'amane_bundle.py') --root $ProjectRoot
+if ($LASTEXITCODE -ne 0) { throw 'amane 发行资源校验失败。' }
+$AmaneDataArgs = @($AmaneDataJson | ConvertFrom-Json)
+& $Python -m PyInstaller --noconfirm --clean @BuildMode @AmaneDataArgs --windowed --name Peach `
     --distpath $BuildDestination --workpath $WorkPath --specpath $BuildPath `
     --paths (Join-Path $ProjectRoot 'src') --python-option 'X utf8' `
     --collect-all curl_cffi --collect-all resvg_py `

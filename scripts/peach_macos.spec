@@ -10,10 +10,13 @@ from PyInstaller.utils.hooks import collect_all, copy_metadata
 root = Path(SPECPATH).parent
 sys.path.insert(0, str(root / "src"))
 from peach.appid import MACOS_BUNDLE_ID
+sys.path.insert(0, str(root / "scripts"))
+from amane_bundle import bridge_data
 
 identity = Path(os.environ["PEACH_MACOS_BUILD_INFO"])
 version = json.loads(identity.read_text(encoding="utf-8"))["version"]
 datas = [(str(root / name), name) for name in ("web", "migrations", "resources")]
+datas += bridge_data(root)
 datas += [(str(identity), "."), (str(root / "scripts" / "standalone.txt"), ".")]
 datas += [(str(root / "LICENSE"), ".")]
 datas += copy_metadata("sentry-sdk")
