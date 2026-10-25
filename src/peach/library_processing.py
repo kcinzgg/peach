@@ -241,16 +241,6 @@ CANDIDATE_FLUSH_SECONDS = 5.0
 COLLECTED_FIELDS = ('title', 'performers', 'studio', 'release_date', 'tags')
 COLUMN_OF = {'title': 'catalog_title'}
 
-#: 一趟任务向外部来源要的总量。三条闸门里谁先到谁生效，之后每部片只记「本趟…已用完」。
-#: 一部片问三家目录站、每家 1～2 次，所以 6000 次约等于 1500 部。请求是一条接一条发的，
-#: 同一主机两问之间隔着主机间隔（默认 2 秒，javdb 3 秒，见 `SOURCE_INTERVALS`），不同主机的间隔
-#: 互不阻塞；6000 次按 2 秒算也要三个多小时，和 4 小时的时间闸门同一量级，哪条先到都说得通。
-#: 封面与资料页合计每次约 250 KB，1 GiB 装得下这 6000 次。
-MAX_SOURCE_REQUESTS = 6000
-MAX_SOURCE_BYTES = 1024 * 1024 * 1024
-MAX_SOURCE_SECONDS = 4 * 3600
-
-
 class CoverKept(NotFound):
     """每个来源都问成了，给得出的封面却不比本机那张宽。按「没有」记进记忆，一周内不再问，
     也不算问题项。"""
@@ -306,21 +296,18 @@ class LibraryMetadataProvider:
     `CredentialStore` 自己会拼上那一层。多给一层的表现不是报错，是每个来源都读成
     「没有凭据」——采集设置里贴好的 JavBus、javdb Cookie 一条都不会被带上。
     """
-    def __init__(self, secrets_root, *, tools_root=None, limiter=None, budget=None, bridge_lock=None):
+    def __init__(self, secrets_root, *, tools_root=None, limiter=None, bridge_lock=None):
         from .scraping_access import SourceTransport
         from .jav_cover_fetch import HostLimitedTransport
         self.secrets_root = Path(secrets_root)
         #: amane 桥的 venv 所在的工具区（`<Peach 数据目录>/tools`）；不给就用配置里的默认位置。
         self.tools_root = Path(tools_root) if tools_root is not None else None
         self.transport = HostLimitedTransport(
-            SourceTransport(secrets_root, max_requests=MAX_SOURCE_REQUESTS,
-                            max_bytes=MAX_SOURCE_BYTES, max_seconds=MAX_SOURCE_SECONDS),
+            SourceTransport(secrets_root),
             2.0, intervals=SOURCE_INTERVALS)
         self.bridge_lock = bridge_lock or threading.Lock()
         if limiter is not None:
             self.transport.limiter = limiter
-        if budget is not None:
-            self.transport.inner.budget = budget
 
     #: 由本机浏览器过验证的来源累计等人点验证的秒数（`_excuse`）。调用方拿它前后相减，把这段时间
     #: 从单项动作预算里扣掉：一个站第一次弹验证窗口时，那一问要等 `min(40, timeout) + 120` 秒，
@@ -1310,16 +1297,14 @@ class _RemoteSession:
         self._consult = not retrying
         self._task_evidence = {}
         self._task_absent = set()
-        from .metadata_parallel import RequestBudget
         from .scripting import HostLimiter
         self.limiter = HostLimiter(SOURCE_INTERVALS, default_interval=2.0)
-        self.budget = RequestBudget(MAX_SOURCE_REQUESTS, MAX_SOURCE_BYTES, MAX_SOURCE_SECONDS)
         self.bridge_lock = threading.Lock()
 
     def fork(self):
         child = _RemoteSession(self._config, self._factory, self.misses,
                                retrying=not self._consult, routes=self._routes)
-        child.limiter, child.budget, child.bridge_lock = self.limiter, self.budget, self.bridge_lock
+        child.limiter, child.bridge_lock = self.limiter, self.bridge_lock
         child._task_evidence, child._task_absent = self._task_evidence, self._task_absent
         return child
 
@@ -1328,7 +1313,7 @@ class _RemoteSession:
             self._provider = (self._factory() if self._factory
                               else LibraryMetadataProvider(self._config.directory('secrets'),
                                   tools_root=self._config.directory('tools'), limiter=self.limiter,
-                                  budget=self.budget, bridge_lock=self.bridge_lock))
+                                  bridge_lock=self.bridge_lock))
         return self._provider
 
     def reset(self):

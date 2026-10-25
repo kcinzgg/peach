@@ -6,7 +6,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import httpx
 from PIL import Image
@@ -208,16 +208,23 @@ class ScrapingAccessTests(unittest.TestCase):
             self.assertIn("再跑一次接着采", str(spent.exception))
             self.assertNotIn("预算", str(spent.exception))
 
-    def test_a_library_scan_asks_for_enough_to_carry_a_batch_of_covers(self):
-        """一趟任务的三条闸门要够一批片子用完，不然每次跑都停在同一个地方。
-
-        一部片问三家目录站、每家 1～2 次，6000 次约等于 1500 部；每来源 2 秒的间隔下
-        三家并行也要 4 小时才用得完，时间不会先掐断请求数。每次约 250 KB，1 GiB 装得下。
-        """
-        from peach import library_processing
-        self.assertEqual(library_processing.MAX_SOURCE_REQUESTS, 6000)
-        self.assertEqual(library_processing.MAX_SOURCE_BYTES, 1024 * 1024 * 1024)
-        self.assertEqual(library_processing.MAX_SOURCE_SECONDS, 4 * 3600)
+    def test_library_collection_keeps_request_limits_independent_of_batch_size(self):
+        """大批次持续采集；每个响应仍使用调用方给定的大小与超时限制。"""
+        from peach.library_processing import LibraryMetadataProvider
+        with patch('peach.scraping_access.time.monotonic', return_value=100):
+            provider = LibraryMetadataProvider(self.root)
+        transport = provider.transport.inner
+        transport.requests, transport.bytes = 6000, 1024 ** 3
+        response = HttpResponse(200, {}, '资料'.encode())
+        sent = Mock(return_value=response)
+        transport.transports['dmm'] = sent
+        request = HttpRequest('GET', 'https://pics.dmm.co.jp/test.jpg', {})
+        with patch('peach.scraping_access.time.monotonic', return_value=100 + 24 * 3600):
+            self.assertIs(transport(request, 7, 4096), response)
+            self.assertIs(transport(request, 7, 4096), response)
+        self.assertEqual(transport.requests, 6002)
+        self.assertEqual(transport.bytes, 1024 ** 3 + 2 * len(response.body))
+        self.assertEqual(sent.call_args.args[1:], (7, 4096))
 
     def test_a_community_source_that_refuses_is_paused_as_a_whole(self):
         """javdb 超配额回 403 不带 Retry-After，接着问只会每条都再撞一次、把封期拖长。"""
