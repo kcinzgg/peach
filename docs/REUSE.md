@@ -616,6 +616,8 @@ Python、npm 与 GitHub Actions 的版本由 `.github/dependabot.yml` 每周检�
 
 ## 静态检查
 
+amane 桥的发行资源复用 PyInstaller 6.22.3 的 `--add-data`／`datas` 和 setuptools 的资源复制。`scripts/amane_bundle.py` 只收集 `bridge.py`、`pyproject.toml`、`uv.lock`，Windows、macOS 与 wheel 共用这份白名单；缺文件在编译前拒绝。运行时复用 `settings_file.PROJECT_ROOT`，分别定位源码树、wheel 的 `_resources` 或 PyInstaller 的 `_MEIPASS`，虚拟环境仍在数据目录。沿用现有构建依赖，无新增运行时依赖；测试覆盖资源实际复制、额外文件排除、缺失失败及源码树外的冻结环境调用。
+
 播放进程的来源通过 Python 标准库 `subprocess` 的独立 `env` 传递，使用 `PEACH_MEDIA_ORIGIN=playback` 与 `PEACH_MEDIA_OWNER_PID` 标注创建者；同步探测、转码、异步 HLS 分片和硬件自检共用 `streaming.playback_environment`。复用既有 `processing_control.CURRENT` 拒绝馆藏工作者借用播放入口，不修改全局环境，不新增依赖。当前树与媒体模块历史已核对；`StreamSessionRegistry` 在启动后登记取消句柄，不能承担启动时来源识别。进程来源是本机运维证据，不是抵御同用户恶意进程的安全边界；外部守卫需同时核验进程树、创建时间和父进程，不能仅按环境标记放行。
 
 Windows 媒体子进程复用 Python 标准库 `subprocess.CREATE_NO_WINDOW`：入库探测、抽帧、拼图、预览、关注封面与媒体修复均显式设置，输出捕获、超时和取消按各入口原有契约处理。该标记由 Windows 原生支持，不引入依赖；见 [Python 文档](https://docs.python.org/3/library/subprocess.html#subprocess.CREATE_NO_WINDOW) 与 [Windows 创建标记](https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags)。

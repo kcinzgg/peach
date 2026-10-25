@@ -4,6 +4,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import runpy
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -495,6 +497,94 @@ class ProviderStageTests(unittest.TestCase):
         with self.assertRaises(NotFound):
             provider.amane("ABW-220", route=("javdb",))
         self.assertEqual(self.calls, [])
+
+
+bundle = runpy.run_path(str(ROOT / 'scripts/amane_bundle.py'))
+
+
+class AmaneBundleTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.source = self.root / '源码目录'
+        target = self.source / 'tools/amane-bridge'
+        target.mkdir(parents=True)
+        for name in bundle['BRIDGE_FILES']:
+            shutil.copyfile(ROOT / 'tools/amane-bridge' / name, target / name)
+        (target / '.venv').mkdir()
+        (target / '.venv/private.txt').write_text('不属于发行资源', encoding='utf-8')
+
+    def test_data_whitelist_and_cli_arguments_agree_and_missing_file_fails(self):
+        rows = bundle['bridge_data'](self.source)
+        self.assertEqual({Path(source).name for source, _ in rows}, {'bridge.py', 'pyproject.toml', 'uv.lock'})
+        self.assertEqual({destination for _, destination in rows}, {'tools/amane-bridge'})
+        result = subprocess.run([sys.executable, str(ROOT / 'scripts/amane_bundle.py'), '--root', str(self.source)],
+                                capture_output=True, text=True, encoding='utf-8', timeout=10, check=True)
+        self.assertEqual(json.loads(result.stdout), bundle['arguments'](self.source))
+        (self.source / 'tools/amane-bridge/bridge.py').unlink()
+        with self.assertRaises(FileNotFoundError):
+            bundle['bridge_data'](self.source)
+
+    @unittest.skipUnless(importlib.util.find_spec('PyInstaller'), '需要构建依赖验证 PyInstaller 资源展开')
+    def test_pyinstaller_expands_only_the_three_bridge_resources(self):
+        from PyInstaller.building.utils import format_binaries_and_datas
+        destination = self.root / '安装包/_internal'
+        for target, source in format_binaries_and_datas(bundle['bridge_data'](self.source)):
+            path = destination / target
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, path)
+        actual = {p.relative_to(destination).as_posix() for p in destination.rglob('*') if p.is_file()}
+        self.assertEqual(actual, {'tools/amane-bridge/' + name for name in bundle['BRIDGE_FILES']})
+
+    def test_wheel_builder_copies_identical_bridge_files(self):
+        with patch('setuptools.setup') as setup, patch('setuptools.command.build_py.build_py.run'):
+            runpy.run_path(str(ROOT / 'setup.py'))
+            command = setup.call_args.kwargs['cmdclass']['build_py']
+            from setuptools import Distribution
+            builder = command(Distribution())
+            builder.build_lib = str(self.root / 'wheel')
+            with patch.object(builder, 'copy_tree'):
+                builder.run()
+        destination = self.root / 'wheel/peach/_resources/tools/amane-bridge'
+        self.assertEqual({p.name for p in destination.iterdir()}, set(bundle['BRIDGE_FILES']))
+        for name in bundle['BRIDGE_FILES']:
+            self.assertEqual((destination / name).read_bytes(), (ROOT / 'tools/amane-bridge' / name).read_bytes())
+
+    def test_frozen_runtime_resolves_bundle_and_executes_bridge_outside_checkout(self):
+        destination = self.root / '发行目录/_internal'
+        shutil.copytree(ROOT / 'resources', destination / 'resources')
+        for source, target in bundle['bridge_data'](self.source):
+            path = destination / target / Path(source).name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, path)
+        # 隔离站点返回，不访问网络；真实启动桥进程并经过正式 JSON 协议。
+        script = destination / 'tools/amane-bridge/bridge.py'
+        script.write_text('import json; print(json.dumps({"number":"SSIS-877","sites":{"makers":{"status":"found","metadata":{"number":"SSIS-877","title":"fixture","thumb_urls":["https://example.test/cover.jpg"]}}}}))', encoding='utf-8')
+        probe = self.root / 'probe.py'
+        probe.write_text('''import json,sys
+from pathlib import Path
+sys._MEIPASS=sys.argv[1]
+from peach import metadata_amane as module
+module.bridge_python=lambda root:Path(sys.executable)
+bridge=module.AmaneBridge.create(Path(sys.argv[2]))
+assert bridge.script==Path(sys._MEIPASS)/'tools/amane-bridge/bridge.py'
+assert module.pinned_revision()
+result=bridge.query('SSIS-877',['makers'],proxy_options={'trust_env':False})
+assert result['sites']['makers']['metadata']['number']=='SSIS-877'
+assert result['sites']['makers']['metadata']['thumb_urls']
+print(json.dumps({'script':str(bridge.script),'ok':True}))
+''', encoding='utf-8')
+        env = {**os.environ, 'PYTHONPATH': str(ROOT / 'src'), 'PEACH_DATA_ROOT': str(self.root / 'data')}
+        result = subprocess.run([sys.executable, str(probe), str(destination), str(self.root / 'tools')],
+                                cwd=self.root, env=env, capture_output=True, text=True, encoding='utf-8', timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(Path(json.loads(result.stdout)['script']), script)
+        script.unlink()
+        missing = subprocess.run([sys.executable, str(probe), str(destination), str(self.root / 'tools')],
+                                 cwd=self.root, env=env, capture_output=True, text=True, encoding='utf-8', timeout=20)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn('桥脚本缺失', missing.stderr)
 
 
 if __name__ == "__main__":

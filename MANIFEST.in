@@ -1,3 +1,5 @@
 recursive-include migrations *.sql
+include scripts/amane_bundle.py
+include tools/amane-bridge/bridge.py tools/amane-bridge/pyproject.toml tools/amane-bridge/uv.lock
 recursive-include web *
 recursive-include resources *.png *.jpg *.gif *.bmp *.webp *.avif *.svg *.ico *.icns *.json *.txt
