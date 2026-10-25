@@ -24,13 +24,13 @@ class SchedulerTests(unittest.TestCase):
                 barrier = threading.Barrier(limit)
                 threads, snapshots = set(), []
                 lock = threading.Lock()
-                def work(item, call):
+                def work(item, call, lock=lock, threads=threads, barrier=barrier):
                     with lock:
                         threads.add(threading.get_ident())
                     barrier.wait(timeout=10)
                 collect_parallel(range(limit), key=lambda n: n, work=work, complete=lambda *_: None,
-                                 capacity=lambda: limit, checkpoint=lambda: None,
-                                 changed=lambda active, pending: snapshots.append((len(active), pending)))
+                                 capacity=lambda limit=limit: limit, checkpoint=lambda: None,
+                                 changed=lambda active, pending, snapshots=snapshots: snapshots.append((len(active), pending)))
                 self.assertEqual(len(threads), limit)
                 self.assertEqual(snapshots[-1], (0, 0))
                 self.assertLessEqual(max(n for n, _ in snapshots), limit)
