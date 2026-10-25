@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from collections.abc import MutableSet
 from pathlib import Path
@@ -12,6 +13,18 @@ from starlette.responses import FileResponse, Response
 from starlette.types import Receive, Scope, Send
 
 RANGE_PREFIX = "bytes="
+
+
+def playback_environment() -> dict[str, str]:
+    """给播放子进程标注来源；资料工作者不能借播放入口读取媒体。"""
+    from .processing_control import CURRENT
+
+    if CURRENT.get() is not None:
+        raise RuntimeError('馆藏处理任务不能使用播放子进程')
+    environment = os.environ.copy()
+    environment['PEACH_MEDIA_ORIGIN'] = 'playback'
+    environment['PEACH_MEDIA_OWNER_PID'] = str(os.getpid())
+    return environment
 
 
 class StreamSessionRegistry:

@@ -9,6 +9,8 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from .streaming import playback_environment
+
 logger = logging.getLogger(__name__)
 CUDA_DECODE_CODECS = frozenset({"h264", "hevc", "vp9", "av1"})
 PROBE_TIMEOUT_SECONDS = 10
@@ -102,6 +104,7 @@ class HardwareTranscoder:
         try:
             result = subprocess.run(
                 command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                env=playback_environment(),
                 stderr=subprocess.PIPE, timeout=PROBE_TIMEOUT_SECONDS,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )

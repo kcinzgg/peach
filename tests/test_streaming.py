@@ -1,11 +1,98 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import subprocess
+import sys
+import time
 import unittest
+from pathlib import Path
+from unittest.mock import AsyncMock, Mock, patch
 
 from peach.streaming import CancellableFileResponse, StreamSessionRegistry
 from peach.mp4index import segment_plan
 from peach.segments import build_hls_playlist
+from peach.streaming import playback_environment
+from peach.processing_control import CURRENT
+
+
+class PlaybackOriginTests(unittest.IsolatedAsyncioTestCase):
+    async def test_environment_is_per_child_and_task_context_is_isolated(self):
+        before = os.environ.copy()
+        environment = playback_environment()
+        self.assertEqual(environment['PEACH_MEDIA_ORIGIN'], 'playback')
+        self.assertEqual(environment['PEACH_MEDIA_OWNER_PID'], str(os.getpid()))
+        self.assertEqual(dict(os.environ), before)
+
+        async def collection():
+            token = CURRENT.set(object())
+            try:
+                await asyncio.sleep(0)
+                with self.assertRaisesRegex(RuntimeError, '馆藏处理任务'):
+                    await asyncio.to_thread(playback_environment)
+            finally:
+                CURRENT.reset(token)
+
+        async def playback():
+            await asyncio.sleep(0)
+            return await asyncio.to_thread(playback_environment)
+
+        _, allowed = await asyncio.gather(collection(), playback())
+        self.assertEqual(allowed['PEACH_MEDIA_ORIGIN'], 'playback')
+
+    async def test_real_child_receives_only_explicit_playback_origin(self):
+        command = [sys.executable, '-c',
+                   'import json,os; print(json.dumps([os.getenv("PEACH_MEDIA_ORIGIN"),os.getenv("PEACH_MEDIA_OWNER_PID")]))']
+        child = subprocess.run(command, env=playback_environment(), capture_output=True,
+                               timeout=10, check=True)
+        self.assertEqual(json.loads(child.stdout), ['playback', str(os.getpid())])
+        self.assertNotIn('PEACH_MEDIA_ORIGIN', os.environ)
+
+    async def test_all_playback_launchers_pass_origin_and_reject_collection(self):
+        from peach.transcodes import TranscodeService
+        from peach.segments import HlsSegmentService, _probe_video_codec
+        from peach.hardware_transcode import HardwareTranscoder, HardwareEncoder
+        from peach.mp4repair import _display_order
+
+        process = Mock(returncode=0)
+        process.communicate.return_value = (b'h264', b'')
+        async_process = Mock(returncode=0, communicate=AsyncMock(return_value=(b'', b'')))
+        transcode = TranscodeService(Mock(), Path('unused-cache'), prefer_hardware=False)
+        hls = HlsSegmentService(Mock(), Path('unused-cache'))
+        registry = StreamSessionRegistry()
+        with patch('peach.transcodes.subprocess.Popen', return_value=process) as popen, \
+                patch('peach.segments.subprocess.run', return_value=Mock(returncode=0, stdout=b'h264')) as run, \
+                patch('peach.segments.asyncio.create_subprocess_exec', return_value=async_process) as spawn:
+            async def launch():
+                transcode._execute(('ffprobe', 'fixture.mp4'), session='test', registry=registry,
+                                   deadline=time.monotonic()+5, label='test')
+                _probe_video_codec(Path('ffprobe'), Path('fixture.mp4'))
+                HardwareTranscoder._probe(Path('ffmpeg'), HardwareEncoder('nvenc'))
+                run.return_value.stdout = b'0\n'
+                self.assertEqual(_display_order(Path('ffprobe'), Path('fixture.mp4'), [0]), [0])
+                await hls._run(['ffmpeg', 'fixture.mp4'], 'test', registry)
+
+            await launch()
+            for call in [*popen.call_args_list, *run.call_args_list, *spawn.call_args_list]:
+                self.assertEqual(call.kwargs['env']['PEACH_MEDIA_ORIGIN'], 'playback')
+                self.assertEqual(call.kwargs['env']['PEACH_MEDIA_OWNER_PID'], str(os.getpid()))
+            counts = (popen.call_count, run.call_count, spawn.call_count)
+            token = CURRENT.set(object())
+            try:
+                with self.assertRaisesRegex(RuntimeError, '馆藏处理任务'):
+                    await launch()
+                with self.assertRaisesRegex(RuntimeError, '馆藏处理任务'):
+                    _probe_video_codec(Path('ffprobe'), Path('fixture.mp4'))
+                with self.assertRaisesRegex(RuntimeError, '馆藏处理任务'):
+                    HardwareTranscoder._probe(Path('ffmpeg'), HardwareEncoder('nvenc'))
+                with self.assertRaisesRegex(RuntimeError, '馆藏处理任务'):
+                    await hls._run(['ffmpeg', 'fixture.mp4'], 'test', registry)
+                with self.assertRaisesRegex(RuntimeError, '馆藏处理任务'):
+                    _display_order(Path('ffprobe'), Path('fixture.mp4'), [0])
+            finally:
+                CURRENT.reset(token)
+            self.assertEqual((popen.call_count, run.call_count, spawn.call_count), counts)
 
 
 async def _collect(response, requested: bytes | None, method: str = "GET"):
