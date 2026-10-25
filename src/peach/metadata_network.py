@@ -15,9 +15,9 @@ class MetadataSourceGate:
         self.slots = {}
 
     @contextmanager
-    def slot(self, url):
+    def slot(self, url='', *, source=None):
         from .scraping_access import SOURCES, source_for
-        source = source_for(url) or hostname_of(url)
+        source = source or source_for(url) or hostname_of(url)
         with self.lock:
             semaphore = self.slots.setdefault(source, threading.BoundedSemaphore(self.per_source))
         control = CURRENT.get()
@@ -32,7 +32,7 @@ class MetadataSourceGate:
                     time.sleep(.05)
                 acquired = True
                 checkpoint()
-                self.limiter.wait(SOURCES.get(source, {}).get('login') or url)
+                self.limiter.wait(SOURCES.get(source, {}).get('login') or url or f'https://{source}.invalid/')
                 checkpoint()
             report(network_status='requesting_source', source=source)
             yield

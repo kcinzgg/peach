@@ -346,7 +346,7 @@ class LibraryMetadataProvider:
     def _amane_query(self, code, sites, deadline):
         from contextlib import ExitStack, nullcontext
         from .processing_control import CURRENT, checkpoint
-        from .scraping_access import SOURCES, SourcePaused, paused_until
+        from .scraping_access import SourcePaused, paused_until
         control = CURRENT.get()
         report = getattr(control, 'network', lambda **values: None)
         report(network_status='waiting_source', source='amane')
@@ -357,8 +357,7 @@ class LibraryMetadataProvider:
         try:
             with ExitStack() as stack:
                 for site in sorted(sites):
-                    spec = SOURCES[site]
-                    stack.enter_context(self.transport.gate.slot(spec.get('login') or 'https://' + spec['domains'][0]))
+                    stack.enter_context(self.transport.gate.slot(source=site))
                 sites = [site for site in sites if not paused_until(self.secrets_root, site)]
                 if not sites:
                     return SourcePaused('来源正在冷却，请稍后重试；已有图片保留')

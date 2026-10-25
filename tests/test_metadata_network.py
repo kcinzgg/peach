@@ -89,9 +89,9 @@ class MetadataNetworkTests(unittest.TestCase):
             gate = MetadataSourceGate({}, limiter=Mock())
             provider = LibraryMetadataProvider(root, gate=gate)
             with patch.object(provider, '_amane_query_serial', return_value=[]) as query:
-                self.assertEqual(provider._amane_query('TEST-1', ['mgstage'], None), [])
+                self.assertEqual(provider._amane_query('TEST-1', ['makers', 'mgstage'], None), [])
                 query.assert_called_once()
-                self.assertEqual(set(gate.slots), {'mgstage'})
+                self.assertEqual(set(gate.slots), {'makers', 'mgstage'})
                 query.reset_mock()
                 pause_source(root, 'mgstage', retry_after=300)
                 self.assertIsInstance(provider._amane_query('TEST-2', ['mgstage'], None), SourcePaused)
