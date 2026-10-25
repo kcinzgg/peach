@@ -616,6 +616,8 @@ Python、npm 与 GitHub Actions 的版本由 `.github/dependabot.yml` 每周检�
 
 ## 静态检查
 
+播放进程的来源通过 Python 标准库 `subprocess` 的独立 `env` 传递，使用 `PEACH_MEDIA_ORIGIN=playback` 与 `PEACH_MEDIA_OWNER_PID` 标注创建者；同步探测、转码、异步 HLS 分片和硬件自检共用 `streaming.playback_environment`。复用既有 `processing_control.CURRENT` 拒绝馆藏工作者借用播放入口，不修改全局环境，不新增依赖。当前树与媒体模块历史已核对；`StreamSessionRegistry` 在启动后登记取消句柄，不能承担启动时来源识别。进程来源是本机运维证据，不是抵御同用户恶意进程的安全边界；外部守卫需同时核验进程树、创建时间和父进程，不能仅按环境标记放行。
+
 Windows 媒体子进程复用 Python 标准库 `subprocess.CREATE_NO_WINDOW`：入库探测、抽帧、拼图、预览、关注封面与媒体修复均显式设置，输出捕获、超时和取消按各入口原有契约处理。该标记由 Windows 原生支持，不引入依赖；见 [Python 文档](https://docs.python.org/3/library/subprocess.html#subprocess.CREATE_NO_WINDOW) 与 [Windows 创建标记](https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags)。
 
 抽帧与拼图通过现有 Pillow 12.3.0（HPND）完整解码输出图像，不按压缩文件大小推断有效性。复用既有 FFmpeg、色彩元数据重试与 `support_bundle`：失败记录包含采样秒数、时长、退出码、超时、工具来源和各次尝试的错误输出，错误原文截断并脱敏。诊断 ZIP 收集处理状态、最近 8 份问题清单及启动、更新、隧道证据，每文件最多读取尾部 96 KiB，媒体名称留在本机。有效的不足 1 KiB JPEG、中文路径、失败重试和诊断导出均有回归；FFmpeg 参数依据[官方文档](https://ffmpeg.org/ffmpeg.html)，不引入 ffmpeg-python 等命令包装层，不写真实 ledger。核验范围见 [日志与诊断核验](DIAGNOSTICS.md)。

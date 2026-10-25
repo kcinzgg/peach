@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .mp4index import _iter_boxes
+from .streaming import playback_environment
 
 LOGGER = logging.getLogger(__name__)
 
@@ -153,6 +154,7 @@ def _display_order(ffprobe: Path, source: Path, decode_times: list[int]) -> list
     )
     try:
         completed = subprocess.run(command, capture_output=True, timeout=PROBE_TIMEOUT_SECONDS,
+                                   env=playback_environment(),
                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RepairUnavailable(f"ffprobe 没跑完：{exc}") from exc

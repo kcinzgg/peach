@@ -13,7 +13,7 @@ from pathlib import Path
 from .ffmpeg import FFmpegResolver
 from .hardware_transcode import HardwareTranscoder
 from .mp4index import keyframe_seconds, segment_plan
-from .streaming import StreamSessionRegistry
+from .streaming import StreamSessionRegistry, playback_environment
 
 HLS_SEGMENT_SECONDS = 6
 # 片段缓存上限。超了按最后访问时间淘汰；片段可再生，丢了只是重跑一次 FFmpeg。
@@ -30,6 +30,7 @@ def _probe_video_codec(ffprobe: Path, source: Path) -> str:
                "stream=codec_name", "-of", "default=nw=1:nk=1", str(source))
     try:
         result = subprocess.run(command, capture_output=True, timeout=PROBE_TIMEOUT_SECONDS,
+                                env=playback_environment(),
                                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -285,6 +286,7 @@ class HlsSegmentService:
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
+                env=playback_environment(),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,

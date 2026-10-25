@@ -14,6 +14,7 @@ from pathlib import Path
 from .ffmpeg import FFmpegResolver
 from .hardware_transcode import HardwareTranscoder
 from .mp4index import composition_offsets_present
+from .streaming import playback_environment
 
 
 BROWSER_NATIVE_SUFFIXES = frozenset({".mp4", ".m4v", ".webm", ".ogv", ".ogg"})
@@ -348,6 +349,7 @@ class TranscodeService:
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         process = subprocess.Popen(
             command,
+            env=playback_environment(),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
             stderr=subprocess.PIPE,
