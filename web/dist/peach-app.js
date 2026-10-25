@@ -45037,7 +45037,7 @@ function eF(e) {
 	if (!$P(e)) return "";
 	if (e.status === "paused") return "已暂停，继续后更新预估";
 	if (e.status === "pausing") return "正在暂停，当前步骤结束后暂停";
-	if (e.stalled) return "等待当前文件响应，剩余时间待更新";
+	if (e.stalled) return e.parallel?.active ? "等待采集响应，剩余时间待更新" : "等待当前文件响应，剩余时间待更新";
 	let t = e.eta_seconds_min, n = e.eta_seconds_max;
 	if (t == null || n == null || !Number.isFinite(t) || !Number.isFinite(n) || t < 0 || n < t) return "正在估算剩余时间…";
 	if (n < 60) return "预计剩余不到 1 分钟";

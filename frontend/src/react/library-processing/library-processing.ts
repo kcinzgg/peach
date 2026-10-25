@@ -101,7 +101,7 @@ export function remainingTime(state: LibraryProcessingData): string {
   if (!processingActive(state)) return '';
   if (state.status === 'paused') return '已暂停，继续后更新预估';
   if (state.status === 'pausing') return '正在暂停，当前步骤结束后暂停';
-  if (state.stalled) return '等待当前文件响应，剩余时间待更新';
+  if (state.stalled) return state.parallel?.active ? '等待采集响应，剩余时间待更新' : '等待当前文件响应，剩余时间待更新';
   const low = state.eta_seconds_min, high = state.eta_seconds_max;
   if (low == null || high == null || !Number.isFinite(low) || !Number.isFinite(high) || low < 0 || high < low)
     return '正在估算剩余时间…';
