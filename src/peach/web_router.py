@@ -137,8 +137,24 @@ def _get_index(contract, args):
     )
 
 
+CATALOG_TABLES = ('asset', 'asset_entity', 'entity', 'entity_alias', 'entity_external_ref',
+                  'entity_link', 'entity_membership', 'entity_search_term', 'asset_tag',
+                  'asset_tag_preference', 'asset_preference', 'label_maker', 'performer_profile',
+                  'genre_decision', 'media_binding', 'source', 'watch_queue')
+
+
+def _catalog_cached(contract, key, compute, *, tables=CATALOG_TABLES):
+    """查询只依赖声明的账本表与本机展示输入，磁盘统计保持有限时效。"""
+    return contract.cached_until_changed(
+        key, compute, path_version(contract.cover_root), path_version(contract.avatar_root),
+        path_version(contract.logo_root), path_version(contract.poster_root),
+        path_version(contract.db_path.parent.parent / 'config.toml'), tables=tables, ttl=90)
+
+
 def _get_stats(contract, _args):
-    return contract.cached("stats", lambda: q_stats(contract))
+    return _catalog_cached(contract, "stats", lambda: q_stats(contract),
+                           tables=CATALOG_TABLES + ('activity_event', 'follow_playback', 'follow_item',
+                                                    'follow_source', 'asset_quality_goal'))
 
 
 def _get_tops(contract, args):
@@ -149,7 +165,7 @@ def _get_tops(contract, args):
     # 横滚续接一页一页地要，页号必须进缓存键：不进的话第二页拿回的是第一页的答案。
     page = max(int(args.get("page", "0")), 0)
     folders = {key: args[key] for key in ('folder', 'folder_recursive') if args.get(key)}
-    return contract.cached(
+    return _catalog_cached(contract,
         f"tops{n}p{page}{'-jav' if jav else ''}:{seed}:{state}:{sorted(folders.items())}",
         lambda: q_tops(contract, n, jav=jav, seed=seed, state=state, page=page, filters=folders),
     )
@@ -175,7 +191,7 @@ def _get_related(contract, args):
     """
     asset_id = int(args["id"])
     limit = min(int(args.get("limit", "24")), 60)
-    return contract.cached_lru(
+    return _catalog_cached(contract,
         f"related:{asset_id}:{limit}", lambda: q_related(contract, asset_id, limit))
 
 
@@ -192,7 +208,7 @@ def _get_facets(contract, args):
         'library', 'folder', 'folder_recursive',
     ) if args.get(key)}
     scope_key += repr(sorted(filters.items()))
-    return contract.cached(
+    return _catalog_cached(contract,
         f"facets{'-jav' if jav else ''}:{scope_key}",
         lambda: q_facets(
             contract,
@@ -213,7 +229,7 @@ def _get_suggest(contract, args):
     kinds = suggest_kinds(args.get("kind", ""))
     if not query:
         return q_suggest(contract, "")
-    return contract.cached_lru(
+    return _catalog_cached(contract,
         f"suggest:{limit}:{','.join(kinds)}:{query}",
         lambda: q_suggest(contract, query, limit, kinds))
 

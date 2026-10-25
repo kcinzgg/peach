@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import sqlite3
 import threading
 import time
+import weakref
 
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -38,6 +38,7 @@ from .config import (
 from . import avatar_face
 from . import brand_marks
 from . import jav_poster_crop
+from .artwork_index import ArtworkIndex, EntityImages, GeneratedAvatars
 from .jobs import BackgroundJob
 from .media import normalized_path
 # `previews` 是取图那一侧，不是 web 域处理器：依赖方向仍然只有一个走法。落盘名的
@@ -56,7 +57,7 @@ class AvatarRootIndex(NamedTuple):
     """
 
     entity_images: Mapping[str, str]
-    generated: frozenset[int]
+    generated: GeneratedAvatars
 
 
 
@@ -161,6 +162,12 @@ class WebContract:
         self.database = database or LedgerDatabase(db_path)
         self.db_path = self.database.db_path
         self.snapshot_root = Path(snapshot_root) if snapshot_root is not None else None
+        artwork_db = self.db_path.parent / 'artwork-index.sqlite3'
+        self._covers = ArtworkIndex(artwork_db, self.cover_root, 'cover', reader=self._read_cover)
+        self._avatars = ArtworkIndex(artwork_db, self.avatar_root, 'avatar')
+        self._logos = ArtworkIndex(artwork_db, self.logo_root, 'logo', variants=LOGO_VARIANTS,
+                                  builtins=dict.fromkeys(brand_marks.installed_stems(
+                                      LOGO_VARIANTS, self.marks_root), ''))
         #: 键 → (算出时刻, 输入版本, 结果)，见 `cached()`。
         self.cache: OrderedDict[str, tuple[float, object, object]] = OrderedDict()
         self.cache_lock = threading.Lock()
@@ -169,7 +176,8 @@ class WebContract:
         #: 每次 cache_bust 递增。在途计算据此判断自己出发后缓存是否失效过。
         self.cache_generation = 0
         self.revision_cache_keys: set[str] = set()
-        self.aggregate_locks: dict[str, threading.RLock] = {}
+        self.aggregate_locks = weakref.WeakValueDictionary()
+        self.compute_locks = weakref.WeakValueDictionary()
         self.follow_check_lock = threading.Lock()
         #: 任务中心。每个后台任务的开始、进度与结束都写这一张表，`/tasks` 只读它。
         #: 只读端由 `api` 关掉写入：那边的账本是复制来的，写一行就是一处合不回去的分叉。
@@ -236,19 +244,17 @@ class WebContract:
                              runs=self.task_runs, followup_runner=self.followups)
 
     def cached(self, key, fn, *, ttl: float = CACHE_TTL, version=None):
-        """带 TTL 的读缓存。`fn` 刻意在锁外算——它会读 CSV、查库，拿着锁算会把
-        并发请求全串起来。
+        """同一键的并发读取共用一次计算。"""
+        with self.cache_lock:
+            lock = self.compute_locks.setdefault(key, threading.RLock())
+        with lock:
+            return self._cached_value(key, fn, ttl=ttl, version=version)
 
-        `version` 是这份结果依赖的输入的版本，与存下的不同就算没命中。一个键只存
-        最新算的那一版：封面刮削期间目录版本一直在变，按版本另起键会把整目录索引
-        一份份堆在内存里。
+    def _cached_value(self, key, fn, *, ttl, version):
+        """在键锁内、全局锁外计算，记录结果对应的输入版本。
 
-        代价是计算期间缓存可能被 `cache_bust()` 清掉，那份还没写回的值就是失效前的
-        快照。复核页正是这个场景：`q_review` 在算，用户批准了一条候选，
-        `w_review_decision` 调 `cache_bust`；旧实现照样把批准前的快照写回去，
-        于是用户批准完刷新，看到的还是批准前的列表，而且持续整整一个 TTL。
-
-        用代次挡住：写回前确认这期间没有失效过，否则丢弃这次结果。
+        普通缓存检查失效代次；声明依赖表的缓存保留本次版本，下次访问重新核验。
+        每键只保存一份结果，容量与时效都有界。
         """
         now = time.monotonic()
         with self.cache_lock:
@@ -259,16 +265,24 @@ class WebContract:
             generation = self.cache_generation
         value = fn()
         with self.cache_lock:
-            if generation == self.cache_generation:
+            if generation == self.cache_generation or key in self.revision_cache_keys:
                 # 时间戳沿用进入时的 now：算得比 TTL 还久的结果直接算过期，
                 # 宁可下次重算，也不要把一份已经旧了的数据当新的用。
                 self.cache[key] = (now, version, value)
                 self.cache.move_to_end(key)
                 while len(self.cache) > 192:
-                    self.cache.popitem(last=False)
+                    expired, _ = self.cache.popitem(last=False)
+                    self.revision_cache_keys.discard(expired)
         return value
 
     def cached_lru(self, key, fn, *, maxsize: int = 192, ttl: float = CACHE_TTL):
+        """按键合并在途计算，结果按容量和时效复用。"""
+        with self.cache_lock:
+            lock = self.compute_locks.setdefault(('lru', key), threading.RLock())
+        with lock:
+            return self._cached_lru_value(key, fn, maxsize=maxsize, ttl=ttl)
+
+    def _cached_lru_value(self, key, fn, *, maxsize, ttl):
         """带 TTL 的 LRU 读缓存，给键空间不封闭的场景用（`/api/related` 按资产取键）。
 
         与聚合缓存分开计量，容量和 TTL 可由调用方指定。计算在锁外进行，
@@ -306,7 +320,7 @@ class WebContract:
             return None
         return int(row[0])
 
-    def cached_until_changed(self, key: str, fn, *inputs, tables=()):
+    def cached_until_changed(self, key: str, fn, *inputs, tables=(), ttl=math.inf):
         """只读账本聚合的缓存：账本版本号与 `inputs` 都没变就一直命中，不按时间过期。
 
         `inputs` 是聚合读到的账本之外的东西的版本（候选目录、头像目录、浏览历史库），
@@ -318,15 +332,19 @@ class WebContract:
         """
         if not tables:
             revision = self.ledger_revision()
-            return self.cached(key, fn, ttl=CACHE_TTL if revision is None else math.inf,
+            return self.cached(key, fn, ttl=CACHE_TTL if revision is None else ttl,
                                version=(revision, *inputs))
         # 指定依赖表的聚合共用一次计算；提交后仍按这些表的代次核验。
         with self.cache_lock:
             lock = self.aggregate_locks.setdefault(key, threading.RLock())
-            self.revision_cache_keys.add(key)
         with lock:
             revision = self.ledger_revision(tables)
-            return self.cached(key, fn, ttl=CACHE_TTL if revision is None else math.inf,
+            with self.cache_lock:
+                if revision is not None:
+                    self.revision_cache_keys.add(key)
+                else:
+                    self.revision_cache_keys.discard(key)
+            return self.cached(key, fn, ttl=CACHE_TTL if revision is None else ttl,
                                version=(tuple(tables), revision, *inputs))
 
     def stop_background_jobs(self) -> None:
@@ -386,44 +404,30 @@ class WebContract:
         from .cover_artwork import has_javdb_source
         return path if path.is_file() and not has_javdb_source(path) else None
 
-    def cover_index(self) -> dict[str, dict]:
-        """封面目录扫一遍的索引：casefold(归一番号) → 两份取景提示加封面版本。
+    def cover_index(self) -> Mapping[str, dict]:
+        """持久封面关系；各番号按自身图片与边车的身份更新。"""
+        return self._artwork('cover', self.cover_root)
 
-        值的形状是 `{"frame": 人脸中心或 None, "poster": 正封框或 None, "version": 修改时间}`。
-        两份边车各描述一件事，一次目录扫描一起收齐：`.face.json` 说脸在哪，
-        `.poster.json` 说正封那一块在哪。版本见 `cover_version`。
+    def _artwork(self, kind, root):
+        attribute = {'cover': '_covers', 'avatar': '_avatars', 'logo': '_logos'}[kind]
+        with self.cache_lock:
+            index = getattr(self, attribute)
+            if index.requested_root != Path(root):
+                index = ArtworkIndex(index.database, root, kind, reader=self._read_cover,
+                                     variants=index.variants, builtins=index.builtins)
+                setattr(self, attribute, index)
+            return index
 
-        卡片列表逐行问「有封面吗」「取景是多少」，一页 60 行就是 120+ 次 stat 加
-        读文件；封面目录一次 scandir 就覆盖全部番号，结果走 `cached()` 的 TTL。
-        `/cover` 端点仍走 `cover_path()` 直读，取图不受索引影响。
-
-        键里带目录的修改时间：新落盘或换名替换的封面立刻进索引，按版本缓存的聚合
-        （复核）重算时拿到的也是这一份。原地覆写的边车最多一个 TTL 后生效。
-        """
-        return self.cached("cover-index", self._scan_cover_root,
-                           version=path_version(self.cover_root))
-
-    def _scan_cover_root(self) -> dict[str, dict]:
-        """一次目录扫描同时收集封面存在性和两份 sidecar。目录不存在就是空索引。"""
-        scanned: dict[str, dict] = {}
+    def _read_cover(self, path: Path) -> dict | None:
+        from .cover_artwork import has_javdb_source
         try:
-            with os.scandir(self.cover_root) as entries:
-                for entry in entries:
-                    if not entry.name.endswith(".jpg"):
-                        continue
-                    from .cover_artwork import has_javdb_source
-                    if has_javdb_source(Path(entry.path)):
-                        continue
-                    stem = entry.path[:-len(".jpg")]
-                    scanned[entry.name[:-len(".jpg")].casefold()] = {
-                        "frame": self._cover_focus(stem + ".face.json"),
-                        "poster": self._poster_box(
-                            stem + jav_poster_crop.SIDECAR_SUFFIX),
-                        "version": f"{entry.stat().st_mtime_ns:x}",
-                    }
-        except OSError:
-            return {}
-        return scanned
+            if has_javdb_source(path):
+                return None
+            return {'frame': self._cover_focus(str(path.with_suffix('.face.json'))),
+                    'poster': self._poster_box(str(path.with_suffix(jav_poster_crop.SIDECAR_SUFFIX))),
+                    'version': f'{path.stat().st_mtime_ns:x}'}
+        except FileNotFoundError:
+            return None
 
     @staticmethod
     def _cover_focus(sidecar: str) -> dict | None:
@@ -473,53 +477,9 @@ class WebContract:
         return (self._cover_entry(code) or {}).get("version", "")
 
     def logo_index(self) -> Mapping[str, str]:
-        """厂牌标识目录扫一遍的索引：已装标识的 casefold(落盘名) → 版本。
+        """本机图标的持久索引与随包标识共用同一查询入口。"""
+        return self._artwork('logo', self.logo_root)
 
-        页面据此决定「输出 `<img>` 还是直接首字母垫底」。没有这份索引就只能每个厂牌
-        都先发一次 `/logo`、靠 404 把图换掉：首页顶栏一次渲染 30 个厂牌里 21 个是
-        404，而 404 那条响应不可缓存，每次重绘再打一遍。
-
-        判据必须和 `PreviewService.logo` 逐字一致——同一个 `logo_key`、同样大小写不
-        敏感、同样把 `.icon` / `.logo` 变体算作这个厂牌有图。松一格就是页面说有图却
-        取回 404（碎图），紧一格就是明明装了却永远只显示首字母。
-
-        键里和 `cover_index()` 一样带目录的修改时间，刚装上的标识立刻进索引。
-        """
-        return self.cached("logo-index", self._scan_logo_root,
-                           version=path_version(self.logo_root))
-
-    def _scan_logo_root(self) -> Mapping[str, str]:
-        """一次目录扫描收齐已装标识，并入随仓库分发的那批（ADR-0026）。
-
-        内置那批不进这份索引的话，`/logo` 取得回图而页面判「没图」，厂牌位永远停在
-        首字母——两边判据不一致的后果不是报错，是安静地少显示一批图。
-
-        本机目录不存在时仍然保留内置那批：干净数据目录正是内置资源要顶上的场景。
-
-        版本是这个厂牌几份变体里最新的修改时间：复核批准是原地替换，地址不带版本时同一页
-        里看到的还是旧标识。内置那批随版本分发、不在本机替换，版本是空串。
-        """
-        keys: dict[str, str] = dict.fromkeys(
-            brand_marks.installed_stems(LOGO_VARIANTS, self.marks_root), "")
-        try:
-            with os.scandir(self.logo_root) as entries:
-                for entry in entries:
-                    name = entry.name.casefold()
-                    # `.ct` 边车和 SVG 原件不是 `/logo` 会取的文件，不算这个厂牌有图。
-                    if not name.endswith(".img") or not entry.is_file():
-                        continue
-                    stem = name[:-len(".img")]
-                    for variant in LOGO_VARIANTS:
-                        if stem.endswith(f".{variant}"):
-                            stem = stem[:-len(variant) - 1]
-                            break
-                    if stem:
-                        mtime = entry.stat().st_mtime_ns
-                        if mtime > int(keys.get(stem) or "0", 16):
-                            keys[stem] = f"{mtime:x}"
-        except OSError:
-            return keys
-        return keys
 
     def has_logo(self, studio: str | None) -> bool:
         """这个厂牌是否已装标识。空名字一律为假——`/logo` 也拒绝空 studio。"""
@@ -532,49 +492,10 @@ class WebContract:
         return self.logo_index().get(key.casefold(), "") if key else ""
 
     def avatar_root_index(self) -> AvatarRootIndex:
-        """头像目录扫一遍的索引：已装的实体图，加已经裁好的头像。
+        """实体图与已生成头像的持久索引视图。"""
+        index = self._artwork('avatar', self.avatar_root)
+        return AvatarRootIndex(EntityImages(index), GeneratedAvatars(index))
 
-        页面据此决定「输出 `<img>` 还是直接首字母垫底」。没有这份索引就只能无条件出图、
-        靠 404 把图摘掉：一个作品详情页是 9 个这样的 404（1 个厂牌实体图、4 个人物
-        实体图、4 个头像），而 `/entity-image` 和 `/avatar` 的 404 都不带缓存头，
-        每次重绘再打一整轮。
-
-        实体图和头像同处 `avatar_root`（`{kind}-{id}.img` 与 `{asset_id}.jpg`），
-        所以一次 `os.scandir` 一起收；分成两个缓存键就是同一个目录连扫两遍。
-
-        键里和 `cover_index()` 一样带目录的修改时间，刚装上的实体图立刻进索引，
-        口味与复核按头像目录版本重算时拿到的也是这一份。
-        """
-        return self.cached("avatar-root-index", self._scan_avatar_root,
-                           version=path_version(self.avatar_root))
-
-    def _scan_avatar_root(self) -> AvatarRootIndex:
-        """一次目录扫描同时收齐实体图和已裁头像。目录不存在就是两个空集合。
-
-        实体图顺手记下修改时间：换头像是原地覆盖同一个文件，地址不带版本时，同一页里
-        浏览器直接复用内存里那张旧图，不刷新就看不到新的。Windows 上 `entry.stat()`
-        取自目录枚举本身，不多一次系统调用。
-        """
-        entity_images: dict[str, str] = {}
-        generated: set[int] = set()
-        try:
-            with os.scandir(self.avatar_root) as entries:
-                for entry in entries:
-                    name = entry.name.casefold()
-                    if name.endswith(".img"):
-                        # `.ct`、`.provenance.json`、`.face.json` 都是边车，不是
-                        # `/entity-image` 会取的文件，不算这个实体有图。
-                        if entry.is_file():
-                            entity_images[name[:-len(".img")]] = f"{entry.stat().st_mtime_ns:x}"
-                    elif name.endswith(".jpg"):
-                        # 头像按资产 id 落盘。生成中途的 `<id>.<格>.tmp.jpg` 不算数，
-                        # 它随时会被删掉或改名。
-                        stem = name[:-len(".jpg")]
-                        if stem.isdigit() and entry.is_file():
-                            generated.add(int(stem))
-        except OSError:
-            return AvatarRootIndex({}, frozenset())
-        return AvatarRootIndex(entity_images, frozenset(generated))
 
     def entity_image_version(self, kind: str, entity_id) -> str:
         """这个实体那张图的版本，页面拼进 `/entity-image` 的 `v=`；没有图是空串。

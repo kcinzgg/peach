@@ -54,12 +54,13 @@ def attach_artwork_fields(contract: WebContract, item: dict) -> None:
         item['size'] = None
         item['is_strm'] = True
     key = artwork_key(item['id'], item.get('code'))
-    item['has_cover'] = contract.has_cover(key)
+    cover = contract._cover_entry(key)
+    item['has_cover'] = cover is not None
     item['cover_key'] = key if item['has_cover'] else ''
     if item['has_cover']:
-        item['cover_frame'] = contract.cover_frame(key)
-        item['cover_version'] = contract.cover_version(key)
-        item['poster_box'] = contract.poster_box(key)
+        item['cover_frame'] = cover.get('frame')
+        item['cover_version'] = cover.get('version', '')
+        item['poster_box'] = cover.get('poster')
 
 #: 排序拆成「列 + 方向」两段：`{d}` 由方向填入。方向不进列键，`时长` 才能在同一枚
 #: 控件上翻转，而不是分裂成两个互斥选项，也不会有一个方向在界面上永远点不到。
@@ -407,6 +408,17 @@ def q_items(contract: WebContract, args):
                 r["creator"] = r["creator_entity"]["name"]
             r["performer_total"] = len(refs) or len(all_performers)
             r["_entity_kinds"] = tuple(canonical)
+    attach_catalog_card_fields(contract, rows)
+    attach_saved_follow_cards(contract, rows)
+    attach_multipart_groups(contract, rows)
+    attach_edition_groups(contract, rows)
+    return {"total": cnt, "work_total": work_total, "bytes": total_bytes, "items": rows, "has_more": has_more}
+
+
+def attach_catalog_card_fields(contract, rows):
+    """批量准备卡片图片，再投影展示字段并去掉本机路径。"""
+    contract.cover_index().prefetch(
+        normalise_code_key(artwork_key(row['id'], row.get('code'))).casefold() for row in rows)
     for r in rows:
         r["cost"] = cost_for(r['location'], r.get('path'))
         r["has_thumb"] = contract.has_snapshot(r["snapshot_path"])
@@ -416,11 +428,6 @@ def q_items(contract: WebContract, args):
         attach_jav_display_fields(r, r.get("tags", ()), r.pop("_entity_kinds", ()))
         r.pop("snapshot_path", None)
         r.pop("path", None)                     # 路径不外发，串流走 id
-    attach_saved_follow_cards(contract, rows)
-    attach_multipart_groups(contract, rows)
-    attach_edition_groups(contract, rows)
-    return {"total": cnt, "work_total": work_total, "bytes": total_bytes, "items": rows, "has_more": has_more}
-
 def con_tags(contract: WebContract, ids, qm):
     with contract.read_connection() as c:
         rows = c.execute(
